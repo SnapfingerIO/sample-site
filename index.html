@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sample Gallery</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <p class="eyebrow">Local studies</p>
+      <h1>Sample Gallery</h1>
+      <p class="lede">Nine compositions drawn in the browser. Select one to view it larger.</p>
+    </header>
+
+    <main>
+      <ul class="grid" id="grid" aria-label="Gallery"></ul>
+    </main>
+
+    <div class="lightbox" id="lightbox" hidden>
+      <div class="lightbox-backdrop" data-close></div>
+      <div
+        class="lightbox-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lightbox-title"
+      >
+        <p class="lightbox-count" id="lightbox-title"></p>
+        <button class="nav prev" type="button" aria-label="Previous photo">
+          <span aria-hidden="true">‹</span>
+        </button>
+        <figure>
+          <img id="lightbox-image" alt="" />
+        </figure>
+        <button class="nav next" type="button" aria-label="Next photo">
+          <span aria-hidden="true">›</span>
+        </button>
+        <button class="close" type="button" data-close aria-label="Close">
+          Esc
+        </button>
+      </div>
+    </div>
+
+    <script src="script.js"></script>
+  </body>
+</html>
