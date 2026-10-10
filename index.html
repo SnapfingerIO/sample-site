@@ -3,21 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sample Gallery</title>
+    <title>Lucent</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <canvas class="sky" id="sky" aria-hidden="true"></canvas>
+    <div class="view" aria-hidden="true">
+      <div class="ocean"></div>
+      <div class="veil"></div>
+      <div class="beam-wrap">
+        <div class="beam"></div>
+      </div>
+      <div class="arch"></div>
+      <div class="mullions"></div>
+      <div class="lamp"></div>
+    </div>
 
-    <header class="site-header">
-      <p class="eyebrow">A little night sky</p>
-      <h1>Sample Gallery</h1>
-      <p class="lede">Nine tiny heavens, painted in the browser. Open one and wander the stars.</p>
-    </header>
+    <div class="room">
+      <header class="site-header">
+        <p class="eyebrow">Lantern Room</p>
+        <h1>Lucent</h1>
+        <p class="lede">Nine coasts, after dark.</p>
+      </header>
 
-    <main>
-      <ul class="grid" id="grid" aria-label="Gallery"></ul>
-    </main>
+      <main>
+        <ul class="grid" id="grid" aria-label="Exhibition"></ul>
+      </main>
+    </div>
 
     <div class="lightbox" id="lightbox" hidden>
       <div class="lightbox-backdrop" data-close></div>
@@ -28,13 +39,14 @@
         aria-labelledby="lightbox-title"
       >
         <p class="lightbox-count" id="lightbox-title"></p>
-        <button class="nav prev" type="button" aria-label="Previous photo">
+        <button class="nav prev" type="button" aria-label="Previous artwork">
           <span aria-hidden="true">‹</span>
         </button>
         <figure>
           <img id="lightbox-image" alt="" />
+          <figcaption id="lightbox-caption"></figcaption>
         </figure>
-        <button class="nav next" type="button" aria-label="Next photo">
+        <button class="nav next" type="button" aria-label="Next artwork">
           <span aria-hidden="true">›</span>
         </button>
         <button class="close" type="button" data-close aria-label="Close">
