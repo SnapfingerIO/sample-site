@@ -5,30 +5,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Lucent</title>
     <link rel="stylesheet" href="styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./vendor/three/three.module.js"
+        }
+      }
+    </script>
   </head>
   <body>
-    <div class="view" aria-hidden="true">
-      <div class="ocean"></div>
-      <div class="veil"></div>
-      <div class="beam-wrap">
-        <div class="beam"></div>
-      </div>
-      <div class="arch"></div>
-      <div class="mullions"></div>
-      <div class="lamp"></div>
-    </div>
+    <header class="site-header">
+      <p class="eyebrow">Lantern Room</p>
+      <h1>Lucent</h1>
+      <p class="lede">Nine coasts, after dark.</p>
+    </header>
 
-    <div class="room">
-      <header class="site-header">
-        <p class="eyebrow">Lantern Room</p>
-        <h1>Lucent</h1>
-        <p class="lede">Nine coasts, after dark.</p>
-      </header>
+    <canvas id="room-view" aria-hidden="true"></canvas>
+    <p id="hover-label" hidden></p>
 
-      <main>
-        <ul class="grid" id="grid" aria-label="Exhibition"></ul>
-      </main>
-    </div>
+    <main>
+      <ul class="grid" id="grid" aria-label="Exhibition"></ul>
+    </main>
 
     <div class="lightbox" id="lightbox" hidden>
       <div class="lightbox-backdrop" data-close></div>
@@ -55,6 +52,6 @@
       </div>
     </div>
 
-    <script src="script.js"></script>
+    <script type="module" src="script.js"></script>
   </body>
 </html>
