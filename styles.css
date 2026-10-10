@@ -125,6 +125,24 @@ body.is-3d .lede {
   display: none;
 }
 
+#back-to-ring {
+  position: fixed;
+  left: 1.1rem;
+  bottom: 1.2rem;
+  z-index: 4;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--brass-soft);
+  border-radius: 999px;
+  background: rgba(255, 252, 248, 0.9);
+  color: var(--ink);
+  font: 0.95rem var(--serif);
+  cursor: pointer;
+}
+
+#back-to-ring[hidden] {
+  display: none;
+}
+
 .grid {
   list-style: none;
   display: grid;
