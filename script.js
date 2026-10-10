@@ -1,4 +1,9 @@
 import * as THREE from "three";
+import { RoomEnvironment } from "./vendor/three/addons/environments/RoomEnvironment.js";
+import { EffectComposer } from "./vendor/three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "./vendor/three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "./vendor/three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "./vendor/three/addons/postprocessing/OutputPass.js";
 
 const WORKS = [
   {
@@ -166,16 +171,17 @@ function showCurrent() {
   lightboxCaption.textContent = `${work.movement}. ${work.note}`;
 }
 
-const look = {
-  yaw: 0,
-  pitch: window.innerHeight > window.innerWidth ? 0.08 : 0.26,
-};
+const look = { yaw: 0, pitch: 0 };
 const lookTarget = new THREE.Vector3();
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 let renderer;
 let scene;
 let camera;
+let composer;
+let bloomPass;
 let beam;
+let panoTime;
+let panoMotion;
 let artMeshes = [];
 let raf = 0;
 let running = false;
@@ -207,94 +213,121 @@ async function buildRoom() {
     powerPreference: "high-performance",
   });
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NoToneMapping;
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.72;
+  renderer.setPixelRatio(pixelRatio());
   renderer.setSize(window.innerWidth, window.innerHeight);
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x07101c);
-  camera = new THREE.PerspectiveCamera(64, window.innerWidth / window.innerHeight, 0.08, 90);
-  camera.position.set(0, EYE, 1.7);
+  scene.environmentIntensity = 0.28;
+  camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.08, 90);
+  camera.position.set(0, EYE, 0);
 
   const roomRadius = 7;
-  const roomHeight = 4.25;
+  const roomHeight = 6.5;
   const viewRadius = 12;
   const bandHeight = Math.PI * 2 * viewRadius * PANO_ASPECT;
 
-  scene.add(new THREE.AmbientLight(0xf7f2ea, 0.38));
-  scene.add(new THREE.HemisphereLight(0xe7eef6, 0xd9c7a2, 0.28));
-  addEnvironment();
+  const environment = new RoomEnvironment();
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(environment, 0.04).texture;
+  pmrem.dispose();
+  environment.dispose();
+
+  scene.add(new THREE.AmbientLight(0xf4efe6, 0.035));
+  scene.add(new THREE.HemisphereLight(0x9eb4d4, 0xc4a882, 0.05));
 
   const brass = new THREE.MeshStandardMaterial({
-    color: 0xc6a15e,
-    emissive: 0x5c4318,
-    emissiveIntensity: 0.45,
-    metalness: 0.62,
-    roughness: 0.32,
+    color: 0xe0b45a,
+    metalness: 1,
+    roughness: 0.16,
+    envMapIntensity: 1.35,
   });
   const white = new THREE.MeshStandardMaterial({
-    color: 0xf7f4ef,
-    roughness: 0.42,
-    metalness: 0.02,
+    color: 0xf7f5f1,
+    roughness: 0.38,
+    metalness: 0,
+  });
+  const matte = new THREE.MeshStandardMaterial({
+    color: 0xf6f3ec,
+    roughness: 0.86,
+    metalness: 0,
   });
 
   const floor = new THREE.Mesh(
-    new THREE.CircleGeometry(roomRadius, 72),
-    new THREE.MeshStandardMaterial({
-      color: 0xf4f0e8,
-      roughness: 0.08,
-      metalness: 0.28,
-      envMapIntensity: 1.15,
+    new THREE.CircleGeometry(roomRadius, 80),
+    new THREE.MeshPhysicalMaterial({
+      color: 0xe7dfd2,
+      roughness: 0.045,
+      metalness: 0.06,
+      clearcoat: 1,
+      clearcoatRoughness: 0.04,
+      envMapIntensity: 0.7,
     }),
   );
   floor.rotation.x = -Math.PI / 2;
   floor.position.y = 0.01;
   scene.add(floor);
 
-  const inlay = new THREE.Mesh(new THREE.TorusGeometry(3.15, 0.018, 12, 120), brass);
+  const inlay = new THREE.Mesh(
+    new THREE.TorusGeometry(3.35, 0.012, 12, 140),
+    new THREE.MeshStandardMaterial({
+      color: 0xf0c56a,
+      metalness: 1,
+      roughness: 0.12,
+      emissive: 0x8a6230,
+      emissiveIntensity: 0.35,
+      envMapIntensity: 1.4,
+    }),
+  );
   inlay.rotation.x = Math.PI / 2;
-  inlay.position.y = 0.028;
+  inlay.position.y = 0.02;
   scene.add(inlay);
 
   const ceiling = new THREE.Mesh(
-    new THREE.CircleGeometry(roomRadius, 72),
-    new THREE.MeshStandardMaterial({ color: 0xfbfaf7, roughness: 0.62 }),
+    new THREE.CircleGeometry(roomRadius, 80),
+    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.72, metalness: 0 }),
   );
   ceiling.rotation.x = Math.PI / 2;
   ceiling.position.y = roomHeight;
   scene.add(ceiling);
 
   const cove = new THREE.Mesh(
-    new THREE.TorusGeometry(roomRadius - 0.42, 0.055, 12, 80),
+    new THREE.TorusGeometry(roomRadius - 0.55, 0.07, 16, 96),
     new THREE.MeshStandardMaterial({
-      color: 0xfff4e2,
-      emissive: 0xffe0b0,
-      emissiveIntensity: 0.85,
+      color: 0xfff6e8,
+      emissive: 0xfff3df,
+      emissiveIntensity: 0.45,
       roughness: 0.4,
     }),
   );
   cove.rotation.x = Math.PI / 2;
-  cove.position.y = roomHeight - 0.12;
+  cove.position.y = roomHeight - 0.16;
   scene.add(cove);
 
-  const glass = new THREE.MeshBasicMaterial({
+  const glass = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
+    metalness: 0,
+    roughness: 0.72,
+    specularIntensity: 0.04,
     transparent: true,
-    opacity: 0.08,
+    opacity: 0.015,
+    envMapIntensity: 0.04,
     depthWrite: false,
     side: THREE.DoubleSide,
   });
   const wall = new THREE.Mesh(
-    new THREE.CylinderGeometry(roomRadius, roomRadius, roomHeight, 72, 1, true),
+    new THREE.CylinderGeometry(roomRadius, roomRadius, roomHeight, 80, 1, true),
     glass,
   );
   wall.position.y = roomHeight / 2;
   wall.renderOrder = 2;
   scene.add(wall);
 
-  const mullionGeo = new THREE.BoxGeometry(0.045, roomHeight, 0.05);
-  for (let i = 0; i < 28; i += 1) {
-    const angle = (i / 28) * Math.PI * 2;
+  const mullionGeo = new THREE.BoxGeometry(0.028, roomHeight, 0.03);
+  for (let i = 0; i < 24; i += 1) {
+    const angle = (i / 24) * Math.PI * 2;
     const mullion = new THREE.Mesh(mullionGeo, white);
     mullion.position.set(
       Math.sin(angle) * (roomRadius - 0.02),
@@ -305,20 +338,25 @@ async function buildRoom() {
     scene.add(mullion);
   }
 
-  const rail = new THREE.Mesh(new THREE.TorusGeometry(roomRadius - 0.03, 0.018, 8, 90), white);
+  const rail = new THREE.Mesh(new THREE.TorusGeometry(roomRadius - 0.02, 0.012, 8, 100), white);
   rail.rotation.x = Math.PI / 2;
-  rail.position.y = roomHeight * 0.58;
+  rail.position.y = roomHeight * 0.62;
   scene.add(rail);
 
   addLamp(roomHeight, brass);
 
-  const panoImage = await loadImage("images/pano-night.jpg");
+  const panoImage = paintSmallerMoon(await loadImage("images/pano-night.jpg"));
+  const panoMaterial = new THREE.MeshBasicMaterial({
+    map: textureFromImage(panoImage),
+    side: THREE.BackSide,
+  });
+  dressPanorama(panoMaterial);
   const pano = new THREE.Mesh(
     new THREE.CylinderGeometry(viewRadius, viewRadius, bandHeight, 96, 1, true),
-    new THREE.MeshBasicMaterial({ map: textureFromImage(panoImage), side: THREE.BackSide }),
+    panoMaterial,
   );
   pano.position.y = EYE - bandHeight * (0.5 - HORIZON);
-  pano.rotation.y = Math.PI - moonFraction(panoImage) * Math.PI * 2;
+  pano.rotation.y = Math.PI - moonFraction(panoImage) * Math.PI * 2 + 0.42;
   scene.add(pano);
 
   const sky = new THREE.Mesh(
@@ -335,11 +373,28 @@ async function buildRoom() {
   sea.position.y = pano.position.y - bandHeight / 2 - 9;
   scene.add(sea);
 
-  const panelGlass = glass.clone();
-  panelGlass.opacity = 0.16;
-  panelGlass.color = new THREE.Color(0xe4eef6);
+  const panelGlass = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    metalness: 0,
+    roughness: 0.04,
+    transmission: 1,
+    thickness: 0.04,
+    ior: 1.5,
+    specularIntensity: 0.2,
+    transparent: true,
+    opacity: 1,
+    envMapIntensity: 0.12,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const edgeGlow = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.28,
+    depthWrite: false,
+  });
   const loader = new THREE.TextureLoader();
-  const artRadius = 5.55;
+  const artRadius = 4.45;
 
   await Promise.all(WORKS.map((work, index) => new Promise((resolve, reject) => {
     loader.load(
@@ -348,32 +403,42 @@ async function buildRoom() {
         artTexture.colorSpace = THREE.SRGBColorSpace;
         artTexture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
         const image = artTexture.image;
-        const fitted = fit(image.width, image.height, 1.02, 1.28);
+        const fitted = fit(image.width, image.height, 1.43, 1.79);
         const angle = Math.PI / 9 + index * ((Math.PI * 2) / TOTAL);
         const group = new THREE.Group();
         group.position.set(Math.sin(angle) * artRadius, 0, -Math.cos(angle) * artRadius);
         group.rotation.y = -angle;
 
-        const sheet = new THREE.Mesh(
-          new THREE.PlaneGeometry(fitted[0] + 0.36, 2.55),
-          panelGlass,
-        );
-        sheet.position.y = 1.42;
+        const sheetWidth = fitted[0] + 0.62;
+        const sheet = new THREE.Mesh(new THREE.PlaneGeometry(sheetWidth, 2.9), panelGlass);
+        sheet.position.y = 1.55;
         sheet.renderOrder = 2;
         group.add(sheet);
+        addGlassEdge(group, sheetWidth, 2.9, 1.55, edgeGlow);
+
+        const matBoard = new THREE.Mesh(
+          new THREE.PlaneGeometry(fitted[0] + 0.34, fitted[1] + 0.4),
+          matte,
+        );
+        matBoard.position.set(0, 1.58, 0.03);
+        group.add(matBoard);
 
         const painting = new THREE.Mesh(
           new THREE.PlaneGeometry(fitted[0], fitted[1]),
           new THREE.MeshBasicMaterial({ map: artTexture, depthWrite: true }),
         );
-        painting.position.set(0, 1.48, 0.04);
-        painting.renderOrder = 0;
+        painting.position.set(0, 1.58, 0.06);
+        painting.renderOrder = 1;
         painting.userData.index = index;
         group.add(painting);
         artMeshes.push(painting);
 
-        addFrame(group, fitted[0], fitted[1], brass);
+        addFrame(group, fitted[0] + 0.34, fitted[1] + 0.4, 1.58, brass);
         addFoot(group, brass);
+
+        const wash = new THREE.PointLight(0xffd7a4, 1.5, 3.2, 2);
+        wash.position.set(0, 1.58, 0.7);
+        group.add(wash);
         scene.add(group);
         resolve();
       },
@@ -382,7 +447,22 @@ async function buildRoom() {
     );
   })));
 
-  captureFloor(floor);
+  composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  bloomPass = new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    0.38,
+    0.22,
+    2.7,
+  );
+  const bloomSetSize = bloomPass.setSize.bind(bloomPass);
+  bloomPass.setSize = (width, height) => {
+    const scale = Math.min(window.innerWidth, window.innerHeight) < 800 ? 0.5 : 1;
+    bloomSetSize(width * scale, height * scale);
+  };
+  composer.addPass(bloomPass);
+  composer.addPass(new OutputPass());
+  resize();
 
   applyLook();
   document.body.classList.add("is-3d");
@@ -391,162 +471,230 @@ async function buildRoom() {
   resumeRoom();
 }
 
-function captureFloor(floor) {
-  const target = new THREE.WebGLCubeRenderTarget(128);
-  const probe = new THREE.PerspectiveCamera(90, 1, 0.15, 40);
-  const faces = [
-    [[1, 0, 0], [0, -1, 0]],
-    [[-1, 0, 0], [0, -1, 0]],
-    [[0, 1, 0], [0, 0, 1]],
-    [[0, -1, 0], [0, 0, -1]],
-    [[0, 0, 1], [0, -1, 0]],
-    [[0, 0, -1], [0, -1, 0]],
-  ];
-  probe.position.set(0, 0.5, 0.3);
-  floor.visible = false;
-  beam.visible = false;
-  const previous = renderer.getRenderTarget();
-  faces.forEach(([dir, up], face) => {
-    probe.up.set(up[0], up[1], up[2]);
-    probe.lookAt(probe.position.x + dir[0], probe.position.y + dir[1], probe.position.z + dir[2]);
-    renderer.setRenderTarget(target, face);
-    renderer.render(scene, probe);
-  });
-  renderer.setRenderTarget(previous);
-  floor.visible = true;
-  beam.visible = true;
-  floor.material.envMap = target.texture;
-  floor.material.needsUpdate = true;
-}
-
-function addEnvironment() {
-  const sample = document.createElement("canvas");
-  sample.width = 32;
-  sample.height = 128;
-  const context = sample.getContext("2d");
-  const gradient = context.createLinearGradient(0, 0, 0, 128);
-  gradient.addColorStop(0, "#f7f1e6");
-  gradient.addColorStop(0.18, "#fff6e8");
-  gradient.addColorStop(0.42, "#243656");
-  gradient.addColorStop(0.72, "#0e1a30");
-  gradient.addColorStop(1, "#f3eee4");
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 32, 128);
-  const texture = new THREE.CanvasTexture(sample);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.mapping = THREE.EquirectangularReflectionMapping;
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  scene.environment = pmrem.fromEquirectangular(texture).texture;
-  texture.dispose();
-  pmrem.dispose();
+function dressPanorama(material) {
+  panoTime = { value: 0 };
+  panoMotion = { value: reduceMotion.matches ? 0 : 1 };
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.time = panoTime;
+    shader.uniforms.motion = panoMotion;
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "void main() {",
+        "uniform float time;\nuniform float motion;\nvoid main() {",
+      )
+      .replace(
+        "#include <map_fragment>",
+        `
+          vec2 oceanUv = vMapUv;
+          float horizon = 0.43;
+          float depth = smoothstep(horizon, horizon - 0.32, oceanUv.y);
+          float skyMask = smoothstep(horizon + 0.02, horizon + 0.12, oceanUv.y);
+          vec2 w1 = vec2(
+            sin(oceanUv.x * 16.0 + time * 1.35),
+            cos(oceanUv.y * 12.0 - time * 0.85)
+          );
+          vec2 w2 = vec2(
+            sin(oceanUv.x * 8.0 - oceanUv.y * 6.0 + time * 0.8),
+            sin(oceanUv.y * 10.0 + time * 1.15)
+          );
+          vec2 w3 = vec2(
+            cos(oceanUv.x * 22.0 + oceanUv.y * 4.0 - time * 1.9),
+            sin(oceanUv.x * 5.0 + time * 1.55)
+          );
+          vec2 w4 = vec2(
+            sin(oceanUv.y * 15.0 - time * 1.05),
+            cos(oceanUv.x * 11.0 + time * 0.72)
+          );
+          vec2 shift = w1 * 0.36 + w2 * 0.28 + w3 * 0.2 + w4 * 0.16;
+          oceanUv += shift * (0.006 + 0.004 * depth) * depth * motion;
+          vec4 sampledDiffuseColor = texture2D(map, oceanUv);
+          float waterBright = smoothstep(0.22, 0.62, dot(sampledDiffuseColor.rgb, vec3(0.2, 0.55, 0.25)));
+          float glint = pow(0.5 + 0.5 * sin(oceanUv.x * 150.0 + time * 2.2), 10.0);
+          float glint2 = pow(0.5 + 0.5 * sin(oceanUv.x * 86.0 - oceanUv.y * 34.0 - time * 1.6), 14.0);
+          sampledDiffuseColor.rgb += vec3(0.75, 0.84, 0.95) * waterBright * depth * motion * (glint * 0.28 + glint2 * 0.16);
+          float spark = fract(sin(dot(floor(oceanUv * vec2(900.0, 420.0)), vec2(12.9898, 78.233))) * 43758.5453);
+          float twinkle = 0.94 + 0.06 * sin(time * 1.1 + spark * 6.28318);
+          float star = smoothstep(0.62, 0.92, max(sampledDiffuseColor.r, max(sampledDiffuseColor.g, sampledDiffuseColor.b)));
+          sampledDiffuseColor.rgb *= mix(1.0, twinkle, star * skyMask * motion);
+          float hot = smoothstep(0.82, 0.98, max(sampledDiffuseColor.r, max(sampledDiffuseColor.g, sampledDiffuseColor.b)));
+          sampledDiffuseColor.rgb *= mix(1.0, 3.6, hot * skyMask);
+          diffuseColor *= sampledDiffuseColor;
+        `,
+      );
+  };
 }
 
 function addLamp(roomHeight, brass) {
   const lamp = new THREE.Group();
-  lamp.position.y = roomHeight - 1.02;
+  lamp.position.y = 4.15;
+
+  const lampGlass = new THREE.MeshPhysicalMaterial({
+    color: 0xf4f7fb,
+    metalness: 0,
+    roughness: 0.02,
+    transparent: true,
+    opacity: 0.1,
+    envMapIntensity: 0.35,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const ribGlass = new THREE.MeshPhysicalMaterial({
+    color: 0xe7eef6,
+    metalness: 0,
+    roughness: 0.08,
+    transparent: true,
+    opacity: 0.55,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
 
   const glassShade = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.28, 0.28, 0.46, 24, 1, true),
-    new THREE.MeshBasicMaterial({
-      color: 0xfff6e4,
-      transparent: true,
-      opacity: 0.18,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    }),
+    new THREE.CylinderGeometry(0.36, 0.36, 0.7, 40, 1, true),
+    lampGlass,
   );
-  glassShade.renderOrder = 2;
+  glassShade.renderOrder = 3;
   lamp.add(glassShade);
 
-  const bulb = new THREE.Mesh(
-    new THREE.SphereGeometry(0.09, 20, 16),
-    new THREE.MeshBasicMaterial({ color: 0xffd9a0 }),
-  );
-  lamp.add(bulb);
+  for (let i = 0; i < 9; i += 1) {
+    const ridge = new THREE.Mesh(new THREE.TorusGeometry(0.355, 0.016, 8, 36), ribGlass);
+    ridge.rotation.x = Math.PI / 2;
+    ridge.position.y = -0.3 + i * 0.075;
+    ridge.renderOrder = 3;
+    lamp.add(ridge);
+  }
 
-  [0.25, -0.25].forEach((offset) => {
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.028, 10, 28), brass);
+  const core = new THREE.Mesh(
+    new THREE.SphereGeometry(0.07, 24, 16),
+    new THREE.MeshStandardMaterial({
+      color: 0xfff6e4,
+      emissive: 0xfff1c9,
+      emissiveIntensity: 9,
+      roughness: 0.25,
+    }),
+  );
+  lamp.add(core);
+
+  [0.36, -0.36].forEach((offset) => {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.39, 0.032, 12, 32), brass);
     ring.rotation.x = Math.PI / 2;
     ring.position.y = offset;
     lamp.add(ring);
   });
 
-  const barGeo = new THREE.BoxGeometry(0.018, 0.46, 0.018);
-  for (let i = 0; i < 8; i += 1) {
+  const barGeo = new THREE.BoxGeometry(0.016, 0.7, 0.016);
+  for (let i = 0; i < 10; i += 1) {
     const bar = new THREE.Mesh(barGeo, brass);
-    const angle = (i / 8) * Math.PI * 2;
-    bar.position.set(Math.sin(angle) * 0.28, 0, Math.cos(angle) * 0.28);
+    const angle = (i / 10) * Math.PI * 2;
+    bar.position.set(Math.sin(angle) * 0.36, 0, Math.cos(angle) * 0.36);
     lamp.add(bar);
   }
 
-  const stemLength = roomHeight - lamp.position.y - 0.22;
-  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, stemLength, 12), brass);
-  stem.position.y = 0.25 + stemLength / 2;
+  const stemLength = roomHeight - lamp.position.y - 0.42;
+  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, stemLength, 12), brass);
+  stem.position.y = 0.36 + stemLength / 2;
   lamp.add(stem);
   scene.add(lamp);
 
-  const light = new THREE.PointLight(0xffe6c0, 6, 10, 2);
+  const light = new THREE.PointLight(0xfff0d4, 1.6, 9, 2);
   light.position.copy(lamp.position);
   scene.add(light);
 
-  const pool = new THREE.SpotLight(0xffe7c2, 16, 12, Math.PI / 3.2, 0.75, 1.4);
+  const pool = new THREE.SpotLight(0xffe4bc, 9, 14, Math.PI / 2.8, 0.92, 1.5);
   pool.position.copy(lamp.position);
   pool.target.position.set(0, 0, 0);
   scene.add(pool, pool.target);
 
   beam = new THREE.Group();
   beam.position.copy(lamp.position);
-  beam.rotation.y = 0.22;
-  addShaft(0.02, 0.36, 8.8, 0.5);
-  addShaft(0.05, 0.9, 8.4, 0.2);
+  beam.rotation.y = 1.52;
+  const beamLength = 55;
+  const meshSpread = THREE.MathUtils.degToRad(5);
+  const radiusNear = 0.08;
+  const radiusFar = radiusNear + Math.tan(meshSpread / 2) * beamLength;
+  addShaft(radiusNear, radiusFar, beamLength);
   scene.add(beam);
 }
 
-function addShaft(radiusNear, radiusFar, length, opacity) {
-  const shaft = new THREE.CylinderGeometry(radiusNear, radiusFar, length, 28, 1, true);
-  shaft.rotateZ(Math.PI / 2);
+function addShaft(radiusNear, radiusFar, length) {
+  const shaft = new THREE.CylinderGeometry(radiusFar, radiusNear, length, 48, 1, true);
+  shaft.rotateZ(-Math.PI / 2);
   shaft.translate(length / 2, 0, 0);
-  const shaftMesh = new THREE.Mesh(shaft, beamMaterial(opacity));
+  const shaftMesh = new THREE.Mesh(shaft, beamMaterial(length));
   shaftMesh.renderOrder = 4;
+  shaftMesh.frustumCulled = false;
   beam.add(shaftMesh);
 }
 
-function beamMaterial(opacity) {
-  const glow = document.createElement("canvas");
-  glow.width = 64;
-  glow.height = 256;
-  const context = glow.getContext("2d");
-  const gradient = context.createLinearGradient(0, 0, 0, 256);
-  gradient.addColorStop(0, "rgba(255, 248, 226, 0.95)");
-  gradient.addColorStop(0.3, "rgba(255, 236, 196, 0.22)");
-  gradient.addColorStop(1, "rgba(255, 228, 180, 0)");
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 64, 256);
-  const map = new THREE.CanvasTexture(glow);
-  map.colorSpace = THREE.SRGBColorSpace;
-  return new THREE.MeshBasicMaterial({
-    map,
-    color: 0xffe7c2,
+function beamMaterial(length) {
+  return new THREE.ShaderMaterial({
     transparent: true,
-    opacity,
     depthWrite: false,
-    side: THREE.DoubleSide,
+    depthTest: false,
     blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    uniforms: {
+      glow: { value: new THREE.Color(0xffe3b8) },
+      beamLength: { value: length },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      varying vec3 vView;
+      void main() {
+        vUv = uv;
+        vec4 worldPos = modelMatrix * vec4(position, 1.0);
+        vNormal = normalize(mat3(modelMatrix) * normal);
+        vView = normalize(cameraPosition - worldPos.xyz);
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+      }
+    `,
+    fragmentShader: `
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      varying vec3 vView;
+      uniform vec3 glow;
+      uniform float beamLength;
+      void main() {
+        float along = vUv.y * beamLength;
+        float facing = abs(dot(normalize(vNormal), normalize(vView)));
+        float edge = mix(0.55, 1.0, smoothstep(0.0, 0.45, facing));
+        float atLens = (1.0 - smoothstep(0.0, 1.0, along)) * 0.12;
+        float outdoor = smoothstep(6.5, 8.5, along) * (1.0 - smoothstep(16.0, 46.0, along));
+        float alpha = max(atLens, outdoor) * edge * 0.28;
+        if (alpha < 0.004) discard;
+        gl_FragColor = vec4(glow, alpha);
+      }
+    `,
   });
 }
 
-function addFrame(group, width, height, brass) {
-  const y = 1.48;
-  const z = 0.05;
-  const thick = 0.025;
+function addGlassEdge(group, width, height, y, material) {
+  const z = 0.012;
   const bars = [
-    [width + thick, thick, 0.02, 0, y + height / 2],
-    [width + thick, thick, 0.02, 0, y - height / 2],
-    [thick, height, 0.02, -width / 2, y],
-    [thick, height, 0.02, width / 2, y],
+    [width, 0.012, 0, y + height / 2],
+    [width, 0.012, 0, y - height / 2],
+    [0.012, height, -width / 2, y],
+    [0.012, height, width / 2, y],
   ];
-  bars.forEach(([w, h, d, x, barY]) => {
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), brass);
+  bars.forEach(([w, h, x, barY]) => {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.008), material);
+    bar.position.set(x, barY, z);
+    bar.renderOrder = 3;
+    group.add(bar);
+  });
+}
+
+function addFrame(group, width, height, y, brass) {
+  const z = 0.045;
+  const thick = 0.018;
+  const bars = [
+    [width + thick, thick, 0, y + height / 2],
+    [width + thick, thick, 0, y - height / 2],
+    [thick, height, -width / 2, y],
+    [thick, height, width / 2, y],
+  ];
+  bars.forEach(([w, h, x, barY]) => {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.012), brass);
     bar.position.set(x, barY, z);
     group.add(bar);
   });
@@ -648,12 +796,20 @@ function noteInteraction() {
   idleAt = performance.now() + 4000;
 }
 
+function pixelRatio() {
+  return Math.min(window.devicePixelRatio || 1, 1.5);
+}
+
 function resize() {
   if (!renderer) return;
+  const ratio = pixelRatio();
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  renderer.setPixelRatio(ratio);
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (!composer) return;
+  composer.setPixelRatio(ratio);
+  composer.setSize(window.innerWidth, window.innerHeight);
 }
 
 function resumeRoom() {
@@ -677,13 +833,112 @@ function tick() {
   }
   raf = requestAnimationFrame(tick);
   const delta = Math.min(clock.getDelta(), 0.05);
-  if (!reduceMotion.matches && beam) beam.rotation.y += delta * 0.18;
-  if (!reduceMotion.matches && performance.now() > idleAt) autoTurn = true;
-  if (autoTurn && !reduceMotion.matches) {
+  const still = reduceMotion.matches;
+  if (panoMotion) panoMotion.value = still ? 0 : 1;
+  if (!still && panoTime) panoTime.value += delta;
+  if (!still && beam) beam.rotation.y += delta * 0.08;
+  if (!still && performance.now() > idleAt) autoTurn = true;
+  if (autoTurn && !still) {
     look.yaw -= delta * 0.045;
     applyLook();
   }
-  renderer.render(scene, camera);
+  composer.render();
+}
+
+function paintSmallerMoon(image) {
+  const canvas = document.createElement("canvas");
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(image, 0, 0);
+  const skyLimit = Math.floor(image.height * 0.52);
+  const pixels = context.getImageData(0, 0, image.width, skyLimit);
+  const { data } = pixels;
+  let best = 0;
+  let centerX = Math.floor(image.width * 0.9);
+  let centerY = Math.floor(skyLimit * 0.7);
+  for (let y = 16; y < skyLimit - 16; y += 4) {
+    for (let x = 16; x < image.width - 16; x += 4) {
+      let sum = 0;
+      let count = 0;
+      for (let dy = -6; dy <= 6; dy += 6) {
+        for (let dx = -6; dx <= 6; dx += 6) {
+          const index = ((y + dy) * image.width + (x + dx)) * 4;
+          sum += data[index] + data[index + 1] + data[index + 2];
+          count += 1;
+        }
+      }
+      const average = sum / count;
+      if (average > best) {
+        best = average;
+        centerX = x;
+        centerY = y;
+      }
+    }
+  }
+
+  const skyPatch = context.getImageData(48, 36, 24, 24).data;
+  let skyRed = 0;
+  let skyGreen = 0;
+  let skyBlue = 0;
+  const skyCount = skyPatch.length / 4;
+  for (let i = 0; i < skyPatch.length; i += 4) {
+    skyRed += skyPatch[i];
+    skyGreen += skyPatch[i + 1];
+    skyBlue += skyPatch[i + 2];
+  }
+  skyRed /= skyCount;
+  skyGreen /= skyCount;
+  skyBlue /= skyCount;
+
+  let radius = 48;
+  for (let ring = 24; ring < 160; ring += 3) {
+    let sum = 0;
+    let count = 0;
+    for (let turn = 0; turn < 16; turn += 1) {
+      const angle = (turn / 16) * Math.PI * 2;
+      const x = Math.round(centerX + Math.cos(angle) * ring);
+      const y = Math.round(centerY + Math.sin(angle) * ring);
+      if (x < 0 || y < 0 || x >= image.width || y >= skyLimit) continue;
+      const index = (y * image.width + x) * 4;
+      sum += data[index] + data[index + 1] + data[index + 2];
+      count += 1;
+    }
+    if (count && sum / count < skyRed + skyGreen + skyBlue + 70) {
+      radius = ring;
+      break;
+    }
+  }
+
+  const paint = context.getImageData(0, 0, image.width, skyLimit);
+  const paintData = paint.data;
+  const reach = radius * 1.15;
+  for (let y = Math.max(0, centerY - reach); y < Math.min(skyLimit, centerY + reach); y += 1) {
+    for (let x = Math.max(0, centerX - reach); x < Math.min(image.width, centerX + reach); x += 1) {
+      const dx = x - centerX;
+      const dy = y - centerY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance > reach) continue;
+      const index = (y * image.width + x) * 4;
+      const fade = distance / reach;
+      paintData[index] = paintData[index] * fade + skyRed * (1 - fade);
+      paintData[index + 1] = paintData[index + 1] * fade + skyGreen * (1 - fade);
+      paintData[index + 2] = paintData[index + 2] * fade + skyBlue * (1 - fade);
+    }
+  }
+  context.putImageData(paint, 0, 0);
+
+  const small = Math.max(18, radius / 3);
+  const glow = context.createRadialGradient(centerX, centerY, small * 0.2, centerX, centerY, small * 2.4);
+  glow.addColorStop(0, "rgba(255, 252, 245, 1)");
+  glow.addColorStop(0.35, "rgba(244, 246, 252, 0.95)");
+  glow.addColorStop(0.7, "rgba(210, 220, 235, 0.28)");
+  glow.addColorStop(1, "rgba(210, 220, 235, 0)");
+  context.fillStyle = glow;
+  context.beginPath();
+  context.arc(centerX, centerY, small * 2.4, 0, Math.PI * 2);
+  context.fill();
+  return canvas;
 }
 
 function textureFromImage(image) {
