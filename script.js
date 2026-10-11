@@ -66,23 +66,24 @@ const TOTAL = WORKS.length;
 const DEG = Math.PI / 180;
 
 const EYE = 1.6;
-const RING = 1.8;
+const RING = 3.2;
 const ROOM_RADIUS = 5.6;
 const SOFFIT_RADIUS = 4.6;
-const SOFFIT_Y = 3.8;
-const CEILING_Y = 4.05;
+const SOFFIT_Y = 3.68;
+const CEILING_Y = 3.8;
 const ART_RADIUS = 3.8;
 const ART_Y = 1.45;
 const FOCUS_GAP = 1.5;
-const LAMP_Y = 3.0;
+const LAMP_Y = 2.8;
 const LENS_RADIUS = 0.35;
 const LENS_HALF = 0.37;
-const DRUM_BOTTOM = 3.62;
+const DRUM_BOTTOM = 3.45;
 const INLAY_RADIUS = 3.55;
+const FIXTURE_RADIUS = 2.55;
 
 const PITCH_MIN = -15 * DEG;
 const PITCH_MAX = 35 * DEG;
-const PITCH_REST = 13 * DEG;
+const PITCH_REST = 4 * DEG;
 const BEAM_SPEED = (Math.PI * 2) / 25;
 const IDLE_DELAY = 8000;
 const IDLE_SPEED = 0.035;
@@ -90,7 +91,7 @@ const IDLE_SPEED = 0.035;
 const PANO_RADIUS = 12;
 const PANO_ASPECT = 1280 / 2720;
 const PANO_HORIZON = 0.433;
-const MOON_ELEVATION = 12 * DEG;
+const MOON_ELEVATION = 9 * DEG;
 const MOON_OFFSET = 0.5;
 const BLOOM_LAYER = 1;
 
@@ -237,9 +238,10 @@ let beam;
 let lampCore;
 let lampCoreColor;
 let lampHalo;
-let moonDisc;
 let floorMaterial;
+let reflection;
 const artSpots = [];
+const bloomTints = [];
 let artMeshes = [];
 let artAngles = [];
 let darkenInBloom = [];
@@ -254,6 +256,7 @@ const shared = {
   beamDir: { value: new THREE.Vector3(1, 0, 0) },
   beamFade: { value: 1 },
   flash: { value: 0 },
+  approach: { value: 0 },
   bloomMode: { value: 0 },
   pixelRatio: { value: 1 },
 };
@@ -301,7 +304,7 @@ async function buildRoom() {
 
   addLights();
   addFloor(brass);
-  addCeiling(brass);
+  addCeiling();
   addGlassWall(white);
   addLamp(brass);
   await addPanorama();
@@ -313,7 +316,6 @@ async function buildRoom() {
   sortBloomObjects();
   resize();
 
-  if (window.innerWidth < window.innerHeight * 0.8) view.pitch = view.pitchGoal = 17 * DEG;
   applyRingPose();
   document.body.classList.add("is-3d");
   bindLook();
@@ -332,14 +334,48 @@ function addFloor(brass) {
     metalness: 0,
     envMapIntensity: 0.9,
   });
+  reflection = {
+    target: new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType }),
+    camera: new THREE.PerspectiveCamera(),
+    matrix: new THREE.Matrix4(),
+    texel: new THREE.Vector2(1, 1),
+    hidden: [],
+  };
   floorMaterial.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      "#include <lights_fragment_begin>",
-      THREE.ShaderChunk.lights_fragment_begin.replace(
-        "#if ( NUM_SPOT_LIGHTS > 0 ) && defined( RE_Direct )",
-        "#if 0",
-      ),
-    );
+    shader.uniforms.reflectMap = { value: reflection.target.texture };
+    shader.uniforms.reflectMatrix = { value: reflection.matrix };
+    shader.uniforms.reflectTexel = { value: reflection.texel };
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nuniform mat4 reflectMatrix;\nvarying vec4 vReflect;")
+      .replace(
+        "#include <project_vertex>",
+        "#include <project_vertex>\nvReflect = reflectMatrix * modelMatrix * vec4(transformed, 1.0);",
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nuniform sampler2D reflectMap;\nuniform vec2 reflectTexel;\nvarying vec4 vReflect;",
+      )
+      .replace(
+        "#include <lights_fragment_begin>",
+        THREE.ShaderChunk.lights_fragment_begin.replace(
+          "#if ( NUM_SPOT_LIGHTS > 0 ) && defined( RE_Direct )",
+          "#if 0",
+        ),
+      )
+      .replace(
+        "#include <opaque_fragment>",
+        `vec2 mirrorUv = vReflect.xy / vReflect.w;
+        vec3 mirrored = texture2D(reflectMap, mirrorUv).rgb * 0.28;
+        mirrored += texture2D(reflectMap, mirrorUv + reflectTexel * vec2(1.2, 2.0)).rgb * 0.18;
+        mirrored += texture2D(reflectMap, mirrorUv + reflectTexel * vec2(-1.2, -2.0)).rgb * 0.18;
+        mirrored += texture2D(reflectMap, mirrorUv + reflectTexel * vec2(-1.2, 2.0)).rgb * 0.18;
+        mirrored += texture2D(reflectMap, mirrorUv + reflectTexel * vec2(1.2, -2.0)).rgb * 0.18;
+        float mirrorView = abs(dot(normal, normalize(vViewPosition)));
+        float mirrorAmount = 0.1 + 0.4 * pow(1.0 - mirrorView, 4.0);
+        outgoingLight = outgoingLight * (1.0 - 0.5 * mirrorAmount) + mirrored * mirrorAmount;
+        #include <opaque_fragment>`,
+      );
   };
   const floor = new THREE.Mesh(new THREE.CircleGeometry(ROOM_RADIUS + 0.05, 96), floorMaterial);
   floor.rotation.x = -Math.PI / 2;
@@ -350,6 +386,45 @@ function addFloor(brass) {
   inlay.scale.z = 0.25;
   inlay.position.y = 0.002;
   scene.add(inlay);
+  reflection.hidden.push(floor, inlay);
+}
+
+const mirrorTarget = new THREE.Vector3();
+const mirrorUp = new THREE.Vector3();
+
+function renderReflection() {
+  const mirror = reflection.camera;
+  camera.updateMatrixWorld();
+  mirror.projectionMatrix.copy(camera.projectionMatrix);
+  mirror.projectionMatrixInverse.copy(camera.projectionMatrixInverse);
+  mirror.position.set(camera.position.x, -camera.position.y, camera.position.z);
+  camera.getWorldDirection(mirrorTarget).add(camera.position);
+  mirrorTarget.y = -mirrorTarget.y;
+  mirrorUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  mirrorUp.y = -mirrorUp.y;
+  mirror.up.copy(mirrorUp);
+  mirror.lookAt(mirrorTarget);
+  mirror.updateMatrixWorld();
+  reflection.matrix.set(
+    0.5, 0, 0, 0.5,
+    0, 0.5, 0, 0.5,
+    0, 0, 0.5, 0.5,
+    0, 0, 0, 1,
+  ).multiply(mirror.projectionMatrix).multiply(mirror.matrixWorldInverse);
+
+  const wasVisible = reflection.hidden.map((object) => object.visible);
+  reflection.hidden.forEach((object) => {
+    object.visible = false;
+  });
+  panoGroup.position.y = mirror.position.y;
+  renderer.setRenderTarget(reflection.target);
+  renderer.clear();
+  renderer.render(scene, mirror);
+  renderer.setRenderTarget(null);
+  panoGroup.position.y = EYE;
+  reflection.hidden.forEach((object, index) => {
+    object.visible = wasVisible[index];
+  });
 }
 
 // Same falloff as three's SpotLight, evaluated once for the floor so its
@@ -404,7 +479,7 @@ function bakeFloorPools() {
   return texture;
 }
 
-function addCeiling(brass) {
+function addCeiling() {
   const warm = new THREE.Color(1, 0.97, 0.92);
 
   const inner = new THREE.RingGeometry(0.33, SOFFIT_RADIUS + 0.02, 160, 28);
@@ -456,14 +531,6 @@ function addCeiling(brass) {
   drumBase.rotation.x = Math.PI / 2;
   drumBase.position.y = DRUM_BOTTOM;
   scene.add(drumBase);
-
-  const can = new THREE.CylinderGeometry(0.04, 0.05, 0.1, 16);
-  for (let i = 0; i < TOTAL; i += 1) {
-    const angle = artAngle(i);
-    const fixture = new THREE.Mesh(can, brass);
-    fixture.position.set(Math.sin(angle) * 2.55, CEILING_Y - 0.05, Math.cos(angle) * 2.55);
-    scene.add(fixture);
-  }
 }
 
 function addGlassWall(white) {
@@ -497,11 +564,6 @@ function addGlassWall(white) {
     mullion.rotation.y = angle;
     scene.add(mullion);
   }
-
-  const rail = new THREE.Mesh(new THREE.TorusGeometry(ROOM_RADIUS - 0.09, 0.013, 8, 160), white);
-  rail.rotation.x = Math.PI / 2;
-  rail.position.y = 0.5;
-  scene.add(rail);
 
   const sill = new THREE.Mesh(
     new THREE.CylinderGeometry(ROOM_RADIUS - 0.04, ROOM_RADIUS - 0.04, 0.1, 128, 1, true),
@@ -637,17 +699,18 @@ function addLamp(brass) {
   beam = new THREE.Group();
   beam.position.copy(lamp.position);
   const length = 60;
-  const near = 0.18;
+  const near = 0.22;
   const far = near + Math.tan(2.5 * DEG) * length;
   const shaft = new THREE.CylinderGeometry(far, near, length, 40, 1, true);
   shaft.rotateZ(-Math.PI / 2);
-  shaft.translate(length / 2 + 0.3, 0, 0);
+  shaft.translate(length / 2 + LENS_RADIUS - 0.03, 0, 0);
   const shaftMesh = new THREE.Mesh(shaft, beamMaterial());
   shaftMesh.renderOrder = 6;
   shaftMesh.frustumCulled = false;
   shaftMesh.layers.enable(BLOOM_LAYER);
   beam.add(shaftMesh);
   scene.add(beam);
+  reflection.hidden.push(beam);
 }
 
 function lensGeometry() {
@@ -684,6 +747,7 @@ function lensMaterial() {
       glow: { value: new THREE.Color(1.0, 0.8, 0.52) },
       beamDir: shared.beamDir,
       flash: shared.flash,
+      approach: shared.approach,
     },
     vertexShader: `
       varying vec3 vNormal;
@@ -701,6 +765,7 @@ function lensMaterial() {
       uniform vec3 glow;
       uniform vec3 beamDir;
       uniform float flash;
+      uniform float approach;
       varying vec3 vNormal;
       varying vec3 vWorld;
       varying vec3 vLocal;
@@ -731,7 +796,11 @@ function lensMaterial() {
         vec3 color = glow * (0.08 + 0.12 * core + light);
         color += vec3(0.82, 0.88, 1.0) * fresnel * 0.25;
         color += vec3(1.0, 0.9, 0.72) * edge * 0.7;
-        float alpha = clamp(0.05 + fresnel * 0.25 + line * 0.55 + beltGlow * 0.35 + edge * 0.45, 0.0, 0.85);
+        float exitPatch = pow(max(dot(radial, beamDir), 0.0), 6.0) * exp(-pow(vLocal.y / 0.2, 2.0));
+        float inner = core * (0.3 + 0.7 * through) * approach;
+        color += glow * (inner * 1.1 + exitPatch * (0.45 + 0.8 * approach));
+        float alpha = clamp(0.05 + fresnel * 0.25 + line * 0.55 + beltGlow * 0.35 + edge * 0.45
+          + inner * 0.22 + exitPatch * 0.3, 0.0, 0.9);
         gl_FragColor = vec4(color, alpha);
       }
     `,
@@ -780,9 +849,10 @@ function beamMaterial() {
         float widest = max(sqrt(max(1.0 - axial * axial, 0.0)), 0.06);
         float soft = clamp(facing / widest, 0.0, 1.0);
         soft *= soft;
-        float start = smoothstep(0.35, 1.2, along);
+        float start = smoothstep(${(LENS_RADIUS - 0.03).toFixed(2)}, ${(LENS_RADIUS + 0.08).toFixed(2)}, along);
         float outside = smoothstep(wallRadius - 0.2, wallRadius + 1.4, along);
-        float haze = mix(0.1, 1.0, outside);
+        float exitGlow = exp(-(along - ${LENS_RADIUS.toFixed(2)}) / 0.45);
+        float haze = mix(0.2, 1.0, outside) + 0.55 * exitGlow;
         float tail = 1.0 - smoothstep(wallRadius + 3.0, 55.0, along);
         tail *= tail;
         float endOn = 1.0 - 0.6 * smoothstep(0.8, 0.98, axial);
@@ -827,7 +897,7 @@ async function addPanorama() {
   panoGroup.add(pano);
 
   const moonDistance = PANO_RADIUS - 0.4;
-  const moonRadius = (moon.radius / 3) * (bandHeight / source.height) * (moonDistance / PANO_RADIUS);
+  const moonRadius = (moon.radius / 4.5) * (bandHeight / source.height) * (moonDistance / PANO_RADIUS);
   const moonPosition = new THREE.Vector3(
     Math.sin(moonAzimuth) * moonDistance,
     Math.tan(MOON_ELEVATION) * moonDistance,
@@ -835,12 +905,13 @@ async function addPanorama() {
   );
 
   const halo = new THREE.Mesh(
-    new THREE.PlaneGeometry(moonRadius * 9, moonRadius * 9),
+    new THREE.PlaneGeometry(moonRadius * 14, moonRadius * 14),
     new THREE.MeshBasicMaterial({
       map: radialTexture([
-        [0, "rgba(255,255,255,0.4)"],
-        [0.12, "rgba(225,232,248,0.22)"],
-        [0.4, "rgba(190,205,235,0.05)"],
+        [0, "rgba(255,255,255,0.3)"],
+        [0.075, "rgba(230,236,250,0.2)"],
+        [0.16, "rgba(205,216,240,0.08)"],
+        [0.4, "rgba(190,205,235,0.025)"],
         [1, "rgba(190,205,235,0)"],
       ]),
       color: new THREE.Color(0.75, 0.82, 0.95),
@@ -858,7 +929,7 @@ async function addPanorama() {
     new THREE.PlaneGeometry(moonRadius * 2, moonRadius * 2),
     new THREE.MeshBasicMaterial({
       map: moonTexture(source, moon),
-      color: new THREE.Color(1.15, 1.15, 1.12),
+      color: new THREE.Color(0.96, 0.96, 0.94),
       transparent: true,
       depthWrite: false,
     }),
@@ -867,12 +938,16 @@ async function addPanorama() {
   disc.rotation.y = moonAzimuth + Math.PI;
   disc.renderOrder = -7;
   disc.layers.enable(BLOOM_LAYER);
-  disc.userData.bloomColor = new THREE.Color(0.32, 0.33, 0.36);
-  disc.userData.color = disc.material.color.clone();
-  moonDisc = disc;
+  bloomTints.push({
+    material: disc.material,
+    color: disc.material.color.clone(),
+    bloom: new THREE.Color(0.3, 0.31, 0.34),
+  });
   panoGroup.add(disc);
 
-  panoGroup.add(starField(moonAzimuth));
+  const stars = starField(moonAzimuth);
+  panoGroup.add(stars);
+  reflection.hidden.push(stars);
 }
 
 function panoramaMaterial(texture) {
@@ -910,34 +985,41 @@ function panoramaMaterial(texture) {
         vec2 uv = vUv;
         float below = clamp((horizon - uv.y) / horizon, 0.0, 1.0);
         float sea = step(uv.y, horizon);
-        float near = smoothstep(0.0, 0.6, below);
-        near *= near;
+        float near = pow(smoothstep(0.0, 0.18, below), 1.6);
 
-        float z = 1.0 / (below + 0.22);
-        vec2 p = vec2(uv.x * 34.0 * z, z * 6.0);
+        float depth = 1.5 / (below + 0.03);
+        vec2 p = vec2(uv.x * 6.2832 * depth, depth);
         float t = time * motion;
-        float w1 = sin(dot(p, vec2(1.0, 2.6)) - t * 0.55);
-        float w2 = sin(dot(p, vec2(-1.4, 3.3)) - t * 0.42 + 1.7);
-        float w3 = sin(dot(p, vec2(2.3, 5.1)) - t * 0.8 + 4.1);
-        float w4 = sin(dot(p, vec2(-0.6, 1.4)) - t * 0.3 + 2.3);
-        vec2 shift = vec2(w1 * 0.4 - w2 * 0.3 + w3 * 0.2, w1 * 0.35 + w2 * 0.3 + w3 * 0.2 + w4 * 0.35);
-        uv += shift * vec2(0.0009, 0.0028) * near * sea * motion;
+        float swell1 = sin(dot(p, vec2(0.35, 0.6)) - t * 0.5);
+        float swell2 = sin(dot(p, vec2(-0.45, 0.5)) - t * 0.36 + 1.3);
+        float chop1 = sin(dot(p, vec2(1.5, 3.0)) - t * 0.95 + 2.1);
+        float chop2 = sin(dot(p, vec2(-2.0, 3.4)) - t * 1.1 + 4.7);
+        float ripple1 = sin(dot(p, vec2(4.4, 7.6)) - t * 1.7);
+        float ripple2 = sin(dot(p, vec2(-5.2, 6.4)) - t * 1.9 + 0.9);
+        vec2 shift = vec2(
+          swell1 * 0.45 - swell2 * 0.25 + chop1 * 0.2 - chop2 * 0.15 + ripple1 * 0.08,
+          swell1 * 0.5 + swell2 * 0.4 + chop1 * 0.25 + chop2 * 0.2 + ripple1 * 0.08 + ripple2 * 0.07
+        );
+        float lift = near * sea * motion;
+        uv += shift * vec2(0.0035, 0.0055) * lift;
+        if (sea > 0.5) uv.y = min(uv.y, horizon - 0.0015);
 
         vec3 color = texture2D(map, uv).rgb;
 
         float path = smoothstep(0.03, 0.16, dot(color, vec3(0.3, 0.5, 0.2)));
-        vec2 g = vec2(uv.x * 2720.0 * 0.22, uv.y * 1280.0 * 0.5 * (0.6 + below));
-        float glint = max(sin(g.x * 1.3 + t * 1.1 + sin(g.y * 0.7)) * sin(g.y * 1.7 - t * 0.9 + w2), 0.0);
-        glint = pow(glint, 14.0);
-        float glintFade = smoothstep(0.02, 0.2, below);
-        color += vec3(0.85, 0.9, 1.0) * glint * path * glintFade * sea * motion * 0.22;
+        color *= 1.0 + (chop1 * 0.22 + ripple1 * 0.14 + swell1 * 0.1) * path * lift;
+        vec2 g = p * vec2(3.1, 2.3);
+        float glint = max(sin(g.x * 1.7 + t * 1.3 + swell1 * 2.0) * sin(g.y * 2.9 - t * 1.1 + chop2 * 1.5), 0.0);
+        glint = pow(glint, 12.0);
+        float glintFade = smoothstep(0.015, 0.09, below);
+        color += vec3(0.85, 0.9, 1.0) * glint * path * glintFade * sea * motion * 0.55;
 
         vec2 heading = normalize(vDir.xz);
         float angle = acos(clamp(dot(heading, normalize(beamDir.xz)), -1.0, 1.0));
         float wedge = exp(-pow(angle / 0.09, 2.0)) * 0.75 + exp(-pow(angle / 0.28, 2.0)) * 0.25;
         float rise = uv.y - horizon;
         float vertical = rise > 0.0 ? exp(-rise / 0.07) : exp(rise / 0.05) * 0.6;
-        float ripple = sea > 0.5 ? 0.8 + 0.4 * glint + 0.2 * w1 * motion : 1.0;
+        float ripple = sea > 0.5 ? 0.8 + 0.4 * glint + 0.2 * swell1 * motion : 1.0;
         color += sweepColor * wedge * vertical * ripple * 0.11;
 
         gl_FragColor = vec4(color, 1.0);
@@ -948,64 +1030,97 @@ function panoramaMaterial(texture) {
 
 function starField(moonAzimuth) {
   const count = 150;
-  const positions = new Float32Array(count * 3);
-  const seeds = new Float32Array(count * 4);
+  const brightCount = 8;
   const radius = PANO_RADIUS - 0.8;
-  let placed = 0;
-  while (placed < count) {
+  const stars = [];
+  while (stars.length < count) {
     const azimuth = Math.random() * Math.PI * 2;
-    const elevation = (2.5 + Math.random() ** 1.4 * 30) * DEG;
+    const rise = Math.random() ** 1.4;
+    const elevation = (2.5 + rise * 30) * DEG;
     const fromMoon = Math.abs(Math.atan2(Math.sin(azimuth - moonAzimuth), Math.cos(azimuth - moonAzimuth)));
     if (fromMoon < 0.12 && Math.abs(elevation - MOON_ELEVATION) < 0.12) continue;
-    positions.set([
-      Math.sin(azimuth) * radius * Math.cos(elevation),
-      Math.sin(elevation) * radius,
-      Math.cos(azimuth) * radius * Math.cos(elevation),
-    ], placed * 3);
-    seeds.set([
-      1 + Math.random(),
-      0.35 + Math.random() * 0.55,
-      0.25 + Math.random() * 0.9,
-      Math.random() * Math.PI * 2,
-    ], placed * 4);
-    placed += 1;
+    const bright = stars.length < brightCount;
+    stars.push({
+      position: [
+        Math.sin(azimuth) * radius * Math.cos(elevation),
+        Math.sin(elevation) * radius,
+        Math.cos(azimuth) * radius * Math.cos(elevation),
+      ],
+      seed: [
+        bright ? 2 + Math.random() * 0.5 : 1 + Math.random(),
+        bright ? 1.3 + Math.random() * 0.3 : 0.5 + Math.random() * 0.5,
+        0.7 + Math.random() * 0.8,
+        Math.random() * 100,
+      ],
+      extra: [rise, Math.random() < 0.15 ? 1 : 0],
+    });
   }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute("seed", new THREE.BufferAttribute(seeds, 4));
-  const stars = new THREE.Points(
-    geometry,
-    new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      uniforms: { time: shared.time, motion: shared.motion, pixelRatio: shared.pixelRatio },
-      vertexShader: `
-        attribute vec4 seed;
-        uniform float time;
-        uniform float motion;
-        uniform float pixelRatio;
-        varying float vBright;
-        void main() {
-          float twinkle = 0.78 + 0.22 * sin(time * seed.z * motion + seed.w);
-          vBright = seed.y * mix(0.9, twinkle, motion);
-          gl_PointSize = seed.x * pixelRatio;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+
+  const material = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      time: shared.time,
+      motion: shared.motion,
+      pixelRatio: shared.pixelRatio,
+      bloomMode: shared.bloomMode,
+    },
+    vertexShader: `
+      attribute vec4 seed;
+      attribute vec2 extra;
+      uniform float time;
+      uniform float motion;
+      uniform float pixelRatio;
+      uniform float bloomMode;
+      varying vec3 vColor;
+      float hash(float n) { return fract(sin(n) * 43758.5453); }
+      float noise(float x) {
+        float i = floor(x);
+        float f = fract(x);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(hash(i), hash(i + 1.0), f);
+      }
+      void main() {
+        float low = 1.0 - extra.x;
+        float rate = seed.z * mix(0.6, 1.5, low);
+        float t = time * motion * rate + seed.w;
+        float n = noise(t * 7.0) * 0.6 + noise(t * 17.0 + 11.0) * 0.4;
+        float depth = mix(0.15, 0.85, low * low);
+        float flicker = mix(1.0, 1.0 + depth * (n * 2.0 - 1.0) * 1.3, motion);
+        vec3 tint = vec3(0.82, 0.88, 1.0);
+        if (extra.y > 0.5) {
+          vec3 shifted = mix(vec3(1.0, 0.76, 0.62), vec3(0.62, 0.8, 1.0), noise(t * 9.0 + 5.0));
+          tint = mix(tint, shifted, 0.75 * motion);
         }
-      `,
-      fragmentShader: `
-        varying float vBright;
-        void main() {
-          float d = length(gl_PointCoord - 0.5) * 2.0;
-          float a = 1.0 - smoothstep(0.4, 1.0, d);
-          gl_FragColor = vec4(vec3(0.82, 0.88, 1.0) * vBright, a);
-        }
-      `,
-    }),
-  );
-  stars.renderOrder = -9;
-  stars.frustumCulled = false;
-  return stars;
+        vColor = tint * seed.y * max(flicker, 0.05) * mix(1.0, 0.35, bloomMode);
+        gl_PointSize = seed.x * pixelRatio;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        float a = 1.0 - smoothstep(0.4, 1.0, d);
+        gl_FragColor = vec4(vColor, a);
+      }
+    `,
+  });
+
+  const group = new THREE.Group();
+  [stars.slice(brightCount), stars.slice(0, brightCount)].forEach((set, index) => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(set.flatMap((star) => star.position), 3));
+    geometry.setAttribute("seed", new THREE.Float32BufferAttribute(set.flatMap((star) => star.seed), 4));
+    geometry.setAttribute("extra", new THREE.Float32BufferAttribute(set.flatMap((star) => star.extra), 2));
+    const points = new THREE.Points(geometry, material);
+    points.renderOrder = -9;
+    points.frustumCulled = false;
+    if (index === 1) points.layers.enable(BLOOM_LAYER);
+    group.add(points);
+  });
+  return group;
 }
 
 async function addArtworks(brass) {
@@ -1022,6 +1137,7 @@ async function addArtworks(brass) {
   });
   const glassEdge = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.42, 0.52, 0.49) });
   const matte = new THREE.MeshStandardMaterial({ color: 0xece8df, roughness: 0.9, envMapIntensity: 0.6 });
+  const fixtures = spotFixtureParts();
 
   await Promise.all(WORKS.map((work, index) => new Promise((resolve, reject) => {
     loader.load(
@@ -1054,9 +1170,10 @@ async function addArtworks(brass) {
         matBoard.userData.index = index;
         group.add(matBoard);
 
+        const spot = addSpot(angle, brass, fixtures);
         const painting = new THREE.Mesh(
           new THREE.PlaneGeometry(width, height),
-          new THREE.MeshBasicMaterial({ map: texture, color: new THREE.Color(0.86, 0.86, 0.86) }),
+          pooledArtMaterial(texture, spot),
         );
         painting.position.set(0, ART_Y, 0.017);
         painting.userData.index = index;
@@ -1066,18 +1183,139 @@ async function addArtworks(brass) {
         addFrame(group, matWidth, matHeight, ART_Y, brass);
         addFoot(group, brass);
         scene.add(group);
-
-        const spot = new THREE.SpotLight(0xffe2bd, 46, 8, 0.3, 0.8, 2);
-        spot.position.set(Math.sin(angle) * 2.55, CEILING_Y - 0.1, Math.cos(angle) * 2.55);
-        spot.target.position.set(Math.sin(angle) * ART_RADIUS, ART_Y, Math.cos(angle) * ART_RADIUS);
-        scene.add(spot, spot.target);
-        artSpots.push(spot);
         resolve();
       },
       undefined,
       reject,
     );
   })));
+}
+
+function spotAim(angle) {
+  const fixture = new THREE.Vector3(
+    Math.sin(angle) * FIXTURE_RADIUS,
+    CEILING_Y - 0.07,
+    Math.cos(angle) * FIXTURE_RADIUS,
+  );
+  const target = new THREE.Vector3(Math.sin(angle) * ART_RADIUS, ART_Y + 0.05, Math.cos(angle) * ART_RADIUS);
+  const direction = target.clone().sub(fixture).normalize();
+  const tilt = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, -1, 0), direction);
+  const origin = fixture.clone().addScaledVector(direction, 0.05);
+  return { fixture, target, tilt, origin };
+}
+
+function spotFixtureParts() {
+  const warm = new THREE.Color(1.0, 0.8, 0.55);
+  const lensMaterial = new THREE.MeshBasicMaterial({ color: warm.clone().multiplyScalar(2.6) });
+  bloomTints.push({
+    material: lensMaterial,
+    color: lensMaterial.color.clone(),
+    bloom: warm.clone().multiplyScalar(0.8),
+  });
+  const lens = new THREE.SphereGeometry(0.043, 20, 8, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2);
+  lens.scale(1, 0.4, 1);
+
+  const { origin, target } = spotAim(0);
+  const length = origin.distanceTo(target);
+  const cone = new THREE.CylinderGeometry(0.04, 0.45, length, 32, 1, true);
+  cone.translate(0, -length / 2, 0);
+
+  return {
+    can: new THREE.CylinderGeometry(0.04, 0.05, 0.1, 20),
+    lens,
+    lensMaterial,
+    cone,
+    coneMaterial: spotConeMaterial(length),
+  };
+}
+
+function addSpot(angle, brass, parts) {
+  const { fixture, target, tilt, origin } = spotAim(angle);
+
+  const can = new THREE.Mesh(parts.can, brass);
+  can.position.copy(fixture);
+  can.quaternion.copy(tilt);
+  const lens = new THREE.Mesh(parts.lens, parts.lensMaterial);
+  lens.position.copy(origin);
+  lens.quaternion.copy(tilt);
+  lens.layers.enable(BLOOM_LAYER);
+  const cone = new THREE.Mesh(parts.cone, parts.coneMaterial);
+  cone.position.copy(origin);
+  cone.quaternion.copy(tilt);
+  cone.renderOrder = 3;
+  reflection.hidden.push(cone);
+
+  const spot = new THREE.SpotLight(0xffe2bd, 58, 8, 0.3, 0.8, 2);
+  spot.position.copy(origin);
+  spot.target.position.copy(target);
+  scene.add(can, lens, cone, spot, spot.target);
+  artSpots.push(spot);
+  return spot;
+}
+
+function spotConeMaterial(length) {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    uniforms: { glow: { value: new THREE.Color(1.0, 0.86, 0.66) } },
+    vertexShader: `
+      varying float vAlong;
+      varying vec3 vNormal;
+      varying vec3 vWorld;
+      void main() {
+        vAlong = -position.y / ${length.toFixed(3)};
+        vec4 world = modelMatrix * vec4(position, 1.0);
+        vWorld = world.xyz;
+        vNormal = normalize(mat3(modelMatrix) * normal);
+        gl_Position = projectionMatrix * viewMatrix * world;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 glow;
+      varying float vAlong;
+      varying vec3 vNormal;
+      varying vec3 vWorld;
+      void main() {
+        vec3 v = normalize(cameraPosition - vWorld);
+        float facing = abs(dot(normalize(vNormal), v));
+        float soft = facing * facing * facing;
+        float fade = smoothstep(0.0, 0.08, vAlong) * (1.0 - smoothstep(0.7, 1.0, vAlong)) * (1.0 - 0.5 * vAlong);
+        gl_FragColor = vec4(glow, soft * fade * 0.06);
+      }
+    `,
+  });
+}
+
+function pooledArtMaterial(texture, spot) {
+  const material = new THREE.MeshBasicMaterial({ map: texture });
+  const origin = spot.position.clone();
+  const direction = spot.target.position.clone().sub(origin).normalize();
+  const cone = new THREE.Vector2(Math.cos(spot.angle * 0.72), Math.cos(spot.angle * 0.08));
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.spotOrigin = { value: origin };
+    shader.uniforms.spotDirection = { value: direction };
+    shader.uniforms.spotCone = { value: cone };
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vPoolWorld;")
+      .replace(
+        "#include <project_vertex>",
+        "#include <project_vertex>\nvPoolWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;",
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nuniform vec3 spotOrigin;\nuniform vec3 spotDirection;\nuniform vec2 spotCone;\nvarying vec3 vPoolWorld;",
+      )
+      .replace(
+        "#include <map_fragment>",
+        `#include <map_fragment>
+        float pool = smoothstep(spotCone.x, spotCone.y, dot(normalize(vPoolWorld - spotOrigin), spotDirection));
+        diffuseColor.rgb *= mix(vec3(0.62), vec3(0.93, 0.9, 0.84), pool);`,
+      );
+  };
+  return material;
 }
 
 function addGlassEdge(group, width, height, y, material) {
@@ -1201,6 +1439,8 @@ function sortBloomObjects() {
 }
 
 function renderFrame() {
+  renderReflection();
+
   darkenInBloom.forEach((mesh) => {
     mesh.material = darkMaterial;
   });
@@ -1209,9 +1449,9 @@ function renderFrame() {
   });
   scene.background = null;
   shared.bloomMode.value = 1;
-  moonDisc.material.color.copy(moonDisc.userData.bloomColor);
+  bloomTints.forEach((tint) => tint.material.color.copy(tint.bloom));
   bloomComposer.render();
-  moonDisc.material.color.copy(moonDisc.userData.color);
+  bloomTints.forEach((tint) => tint.material.color.copy(tint.color));
 
   darkenInBloom.forEach((mesh) => {
     mesh.material = mesh.userData.material;
@@ -1394,9 +1634,9 @@ function pixelRatio() {
 
 function fitFov() {
   const aspect = window.innerWidth / window.innerHeight;
-  const minimumHorizontal = 74 * DEG;
+  const minimumHorizontal = 80 * DEG;
   const vertical = 2 * Math.atan(Math.tan(minimumHorizontal / 2) / aspect) / DEG;
-  return clamp(vertical, 72, 82);
+  return clamp(vertical, 55, 82);
 }
 
 function resize() {
@@ -1408,6 +1648,11 @@ function resize() {
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(ratio);
   renderer.setSize(window.innerWidth, window.innerHeight);
+  const mirrorScale = Math.min(window.innerWidth, window.innerHeight) < 700 ? 0.25 : 0.35;
+  const mirrorWidth = Math.max(1, Math.round(window.innerWidth * ratio * mirrorScale));
+  const mirrorHeight = Math.max(1, Math.round(window.innerHeight * ratio * mirrorScale));
+  reflection.target.setSize(mirrorWidth, mirrorHeight);
+  reflection.texel.set(1 / mirrorWidth, 1 / mirrorHeight);
   if (!finalComposer) return;
   finalComposer.setPixelRatio(ratio);
   finalComposer.setSize(window.innerWidth, window.innerHeight);
@@ -1464,10 +1709,12 @@ function tick() {
   const facing = beamDir.dot(towardCamera);
   shared.beamFade.value = 1 - smooth(0.45, 0.88, facing);
   const flash = smooth(0.9, 1, facing) ** 2;
+  const approach = smooth(0.15, 1, facing) ** 1.5;
   shared.flash.value = flash;
-  lampCore.material.color.copy(lampCoreColor).multiplyScalar(7 + flash * 16);
-  lampHalo.material.opacity = 0.7 + flash * 0.3;
-  lampHalo.scale.setScalar(0.55 + flash * 0.4);
+  shared.approach.value = approach;
+  lampCore.material.color.copy(lampCoreColor).multiplyScalar(7 + approach * 5 + flash * 12);
+  lampHalo.material.opacity = Math.min(1, 0.6 + approach * 0.3 + flash * 0.3);
+  lampHalo.scale.setScalar(0.5 + approach * 0.3 + flash * 0.35);
 
   renderFrame();
 }
@@ -1581,8 +1828,16 @@ function moonTexture(image, moon) {
   output.height = size;
   const context = output.getContext("2d");
   context.drawImage(image, moon.x - crop, moon.y - crop, crop * 2, crop * 2, 0, 0, size, size);
-  const mask = context.createRadialGradient(size / 2, size / 2, size * 0.42, size / 2, size / 2, size * 0.5);
+  const limb = context.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size * 0.5);
+  limb.addColorStop(0, "rgb(255,255,255)");
+  limb.addColorStop(0.6, "rgb(240,240,242)");
+  limb.addColorStop(1, "rgb(165,168,178)");
+  context.globalCompositeOperation = "multiply";
+  context.fillStyle = limb;
+  context.fillRect(0, 0, size, size);
+  const mask = context.createRadialGradient(size / 2, size / 2, size * 0.33, size / 2, size / 2, size * 0.5);
   mask.addColorStop(0, "rgba(0,0,0,1)");
+  mask.addColorStop(0.55, "rgba(0,0,0,0.75)");
   mask.addColorStop(1, "rgba(0,0,0,0)");
   context.globalCompositeOperation = "destination-in";
   context.fillStyle = mask;
