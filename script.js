@@ -95,8 +95,6 @@ const MOON_OFFSET = 0.5;
 const BLOOM_LAYER = 1;
 const METEOR_RADIUS = PANO_RADIUS - 1;
 const METEOR_FADE = 0.4;
-const HINT_DURATION = 6000;
-
 const grid = document.querySelector("#grid");
 const lightbox = document.querySelector("#lightbox");
 const lightboxImage = document.querySelector("#lightbox-image");
@@ -106,7 +104,6 @@ const hoverLabel = document.querySelector("#hover-label");
 const backButton = document.querySelector("#room-back");
 const canvas = document.querySelector("#room-view");
 const intro = document.querySelector("#intro");
-const hint = document.querySelector("#room-hint");
 const soundToggle = document.querySelector("#sound-toggle");
 const listButtons = [];
 
@@ -151,10 +148,7 @@ document.querySelector(".lightbox figure").addEventListener("click", (event) => 
   event.stopPropagation();
 });
 backButton.addEventListener("click", () => leaveArtwork());
-soundToggle.addEventListener("click", () => {
-  dismissHint();
-  toggleOcean();
-});
+soundToggle.addEventListener("click", () => toggleOcean());
 document.addEventListener("visibilitychange", () => {
   if (ocean.on) setOcean(!document.hidden);
 });
@@ -262,8 +256,6 @@ let raf = 0;
 let running = false;
 let lastInput = performance.now();
 let beamAngle = 0.64;
-let hintState = "pending";
-let hintTimer = 0;
 let moonDirection;
 const meteor = {
   group: null,
@@ -1797,7 +1789,6 @@ function showHover(event) {
     hoverLabel.hidden = true;
     return;
   }
-  dismissHint();
   hoverLabel.hidden = false;
   hoverLabel.textContent = WORKS[hit.object.userData.index].title;
 }
@@ -1900,7 +1891,6 @@ function applyRingPose() {
 
 function noteInteraction() {
   lastInput = performance.now();
-  dismissHint();
 }
 
 // A few frames under the curtain let textures upload and shaders compile before the fade.
@@ -1914,42 +1904,17 @@ function revealRoom() {
     }
     lastInput = performance.now();
     soundToggle.hidden = false;
-    const fade = endIntro();
-    hintTimer = setTimeout(showHint, fade * 0.75);
+    endIntro();
   };
   requestAnimationFrame(wait);
 }
 
 function endIntro() {
-  if (!intro) return 0;
+  if (!intro) return;
   const fade = reduceMotion.matches ? 500 : 1600;
   intro.style.transitionDuration = `${fade}ms`;
   intro.classList.add("is-done");
   setTimeout(() => intro.remove(), fade + 100);
-  return fade;
-}
-
-function showHint() {
-  if (hintState !== "pending") return;
-  hintState = "shown";
-  const verbs = coarsePointer.matches ? ["Swipe", "Tap"] : ["Drag", "Click"];
-  hint.textContent = `${verbs[0]} to walk · ${verbs[1]} a work to approach`;
-  hint.hidden = false;
-  void hint.offsetWidth;
-  hint.classList.add("is-visible");
-  hintTimer = setTimeout(dismissHint, HINT_DURATION);
-}
-
-function dismissHint() {
-  if (hintState === "done") return;
-  const shown = hintState === "shown";
-  hintState = "done";
-  clearTimeout(hintTimer);
-  if (!shown) return;
-  hint.classList.remove("is-visible");
-  setTimeout(() => {
-    hint.hidden = true;
-  }, 800);
 }
 
 function toggleOcean() {
