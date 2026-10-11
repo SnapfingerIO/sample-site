@@ -77,7 +77,6 @@ const FOCUS_GAP = 1.5;
 const LAMP_Y = 2.8;
 const LENS_RADIUS = 0.35;
 const LENS_HALF = 0.37;
-const DRUM_BOTTOM = 3.45;
 const INLAY_RADIUS = 3.55;
 const FIXTURE_RADIUS = 2.55;
 
@@ -94,6 +93,9 @@ const PANO_HORIZON = 0.433;
 const MOON_ELEVATION = 9 * DEG;
 const MOON_OFFSET = 0.5;
 const BLOOM_LAYER = 1;
+const METEOR_RADIUS = PANO_RADIUS - 1;
+const METEOR_FADE = 0.4;
+const HINT_DURATION = 6000;
 
 const grid = document.querySelector("#grid");
 const lightbox = document.querySelector("#lightbox");
@@ -103,6 +105,9 @@ const lightboxCaption = document.querySelector("#lightbox-caption");
 const hoverLabel = document.querySelector("#hover-label");
 const backButton = document.querySelector("#room-back");
 const canvas = document.querySelector("#room-view");
+const intro = document.querySelector("#intro");
+const hint = document.querySelector("#room-hint");
+const soundToggle = document.querySelector("#sound-toggle");
 const listButtons = [];
 
 let current = 0;
@@ -146,6 +151,13 @@ document.querySelector(".lightbox figure").addEventListener("click", (event) => 
   event.stopPropagation();
 });
 backButton.addEventListener("click", () => leaveArtwork());
+soundToggle.addEventListener("click", () => {
+  dismissHint();
+  toggleOcean();
+});
+document.addEventListener("visibilitychange", () => {
+  if (ocean.on) setOcean(!document.hidden);
+});
 
 lightbox.addEventListener("click", (event) => {
   if (event.target.closest("figure, .nav")) return;
@@ -250,6 +262,32 @@ let raf = 0;
 let running = false;
 let lastInput = performance.now();
 let beamAngle = 0.64;
+let hintState = "pending";
+let hintTimer = 0;
+let moonDirection;
+const meteor = {
+  group: null,
+  head: null,
+  uniforms: null,
+  active: false,
+  start: 0,
+  duration: 1,
+  speed: 0,
+  brightness: 1,
+  from: new THREE.Vector3(),
+  axis: new THREE.Vector3(),
+  nextAt: 25 + Math.random() * 35,
+};
+const ocean = {
+  context: null,
+  master: null,
+  washGain: null,
+  washFilter: null,
+  on: false,
+  nextWave: 0,
+  timer: 0,
+  sleepTimer: 0,
+};
 const shared = {
   time: { value: 0 },
   motion: { value: reduceMotion.matches ? 0 : 1 },
@@ -266,8 +304,12 @@ const navy = new THREE.Color(0x050b18);
 if (hasWebGL()) {
   buildRoom().catch((error) => {
     console.error(error);
+    pauseRoom();
     document.body.classList.remove("is-3d");
+    endIntro();
   });
+} else {
+  endIntro();
 }
 
 function hasWebGL() {
@@ -300,7 +342,7 @@ async function buildRoom() {
     metalness: 1,
     roughness: 0.22,
   });
-  const white = new THREE.MeshStandardMaterial({ color: 0xf4f1ea, roughness: 0.5 });
+  const white = new THREE.MeshStandardMaterial({ color: 0xeee2cf, roughness: 0.5 });
 
   addLights();
   addFloor(brass);
@@ -311,7 +353,7 @@ async function buildRoom() {
   await addArtworks(brass);
   floorMaterial.lightMap = bakeFloorPools();
 
-  captureEnvironment();
+  captureEnvironment(brass);
   setupComposers();
   sortBloomObjects();
   resize();
@@ -321,15 +363,16 @@ async function buildRoom() {
   bindLook();
   window.addEventListener("resize", resize);
   resumeRoom();
+  revealRoom();
 }
 
 function addLights() {
-  scene.add(new THREE.HemisphereLight(0x3a4c6e, 0x6e5a44, 0.35));
+  scene.add(new THREE.HemisphereLight(0x6a5a4c, 0x5a4636, 0.25));
 }
 
 function addFloor(brass) {
   floorMaterial = new THREE.MeshStandardMaterial({
-    color: 0xe8dfcf,
+    color: 0xd8c3a5,
     roughness: 0.3,
     metalness: 0,
     envMapIntensity: 0.9,
@@ -480,13 +523,13 @@ function bakeFloorPools() {
 }
 
 function addCeiling() {
-  const warm = new THREE.Color(1, 0.97, 0.92);
+  const warm = new THREE.Color(1, 0.78, 0.56).multiplyScalar(0.7);
 
-  const inner = new THREE.RingGeometry(0.33, SOFFIT_RADIUS + 0.02, 160, 28);
+  const inner = new THREE.RingGeometry(0, SOFFIT_RADIUS + 0.02, 160, 30);
   shadeRadially(inner, (r) => {
     const cove = Math.exp(-(SOFFIT_RADIUS - r) / 0.7);
-    const lamp = Math.exp(-(r - 0.33) / 0.8);
-    return 0.46 + cove * 0.36 + lamp * 0.1;
+    const lamp = Math.exp(-r / 0.8);
+    return 0.46 + cove * 0.36 + lamp * 0.14;
   }, warm);
   const ceiling = new THREE.Mesh(inner, new THREE.MeshBasicMaterial({ vertexColors: true }));
   ceiling.rotation.x = Math.PI / 2;
@@ -512,25 +555,11 @@ function addCeiling() {
 
   const lip = new THREE.Mesh(
     new THREE.TorusGeometry(SOFFIT_RADIUS, 0.012, 6, 192),
-    new THREE.MeshBasicMaterial({ color: new THREE.Color(0.86, 0.82, 0.74) }),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(0.86, 0.72, 0.56).multiplyScalar(0.72) }),
   );
   lip.rotation.x = Math.PI / 2;
   lip.position.y = SOFFIT_Y;
   scene.add(lip);
-
-  const drumHeight = CEILING_Y - DRUM_BOTTOM;
-  const drumGeometry = new THREE.CylinderGeometry(0.33, 0.33, drumHeight, 48, 4, true);
-  shadeVertically(drumGeometry, drumHeight, (t) => 0.7 - 0.2 * t, warm);
-  const drum = new THREE.Mesh(drumGeometry, new THREE.MeshBasicMaterial({ vertexColors: true }));
-  drum.position.y = DRUM_BOTTOM + drumHeight / 2;
-  scene.add(drum);
-  const drumBase = new THREE.Mesh(
-    new THREE.CircleGeometry(0.33, 48),
-    new THREE.MeshBasicMaterial({ color: new THREE.Color(0.58, 0.54, 0.48) }),
-  );
-  drumBase.rotation.x = Math.PI / 2;
-  drumBase.position.y = DRUM_BOTTOM;
-  scene.add(drumBase);
 }
 
 function addGlassWall(white) {
@@ -567,7 +596,7 @@ function addGlassWall(white) {
 
   const sill = new THREE.Mesh(
     new THREE.CylinderGeometry(ROOM_RADIUS - 0.04, ROOM_RADIUS - 0.04, 0.1, 128, 1, true),
-    new THREE.MeshStandardMaterial({ color: 0xf2eee6, roughness: 0.5, side: THREE.BackSide }),
+    new THREE.MeshStandardMaterial({ color: 0xecdfca, roughness: 0.5, side: THREE.BackSide }),
   );
   sill.position.y = 0.05;
   scene.add(sill);
@@ -671,13 +700,40 @@ function addLamp(brass) {
     brass,
   );
   lamp.add(cap);
-  const mountHeight = DRUM_BOTTOM - LAMP_Y - (capTop + 0.12);
-  const mount = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, mountHeight, 24), brass);
-  mount.position.y = capTop + 0.12 + mountHeight / 2;
-  lamp.add(mount);
-  const canopy = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 0.035, 40), brass);
-  canopy.position.y = DRUM_BOTTOM - LAMP_Y - 0.018;
-  lamp.add(canopy);
+
+  const capPeak = capTop + 0.12;
+  const neck = new THREE.Mesh(
+    new THREE.LatheGeometry([
+      new THREE.Vector2(0.07, capPeak),
+      new THREE.Vector2(0.05, capPeak + 0.018),
+      new THREE.Vector2(0.03, capPeak + 0.03),
+      new THREE.Vector2(0.026, capPeak + 0.06),
+      new THREE.Vector2(0.012, capPeak + 0.07),
+    ], 32),
+    brass,
+  );
+  lamp.add(neck);
+
+  const ceiling = CEILING_Y - LAMP_Y;
+  const rose = new THREE.Mesh(
+    new THREE.LatheGeometry([
+      new THREE.Vector2(0.012, ceiling - 0.06),
+      new THREE.Vector2(0.024, ceiling - 0.058),
+      new THREE.Vector2(0.03, ceiling - 0.045),
+      new THREE.Vector2(0.075, ceiling - 0.032),
+      new THREE.Vector2(0.11, ceiling - 0.016),
+      new THREE.Vector2(0.125, ceiling - 0.006),
+      new THREE.Vector2(0.13, ceiling),
+    ], 40),
+    brass,
+  );
+  lamp.add(rose);
+
+  const rodBottom = capPeak + 0.065;
+  const rodTop = ceiling - 0.055;
+  const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, rodTop - rodBottom, 16), brass);
+  rod.position.y = (rodTop + rodBottom) / 2;
+  lamp.add(rod);
 
   const baseTop = -LENS_HALF - 0.06;
   const base = new THREE.Mesh(
@@ -903,6 +959,7 @@ async function addPanorama() {
     Math.tan(MOON_ELEVATION) * moonDistance,
     Math.cos(moonAzimuth) * moonDistance,
   );
+  moonDirection = moonPosition.clone().normalize();
 
   const halo = new THREE.Mesh(
     new THREE.PlaneGeometry(moonRadius * 14, moonRadius * 14),
@@ -947,7 +1004,8 @@ async function addPanorama() {
 
   const stars = starField(moonAzimuth);
   panoGroup.add(stars);
-  reflection.hidden.push(stars);
+  panoGroup.add(meteorTrail());
+  reflection.hidden.push(stars, meteor.group);
 }
 
 function panoramaMaterial(texture) {
@@ -1032,14 +1090,16 @@ function starField(moonAzimuth) {
   const count = 150;
   const brightCount = 8;
   const radius = PANO_RADIUS - 0.8;
+  const shimmerCount = 3;
   const stars = [];
   while (stars.length < count) {
+    const bright = stars.length < brightCount;
+    const shimmer = stars.length < shimmerCount;
     const azimuth = Math.random() * Math.PI * 2;
-    const rise = Math.random() ** 1.4;
+    const rise = shimmer ? 0.04 + Math.random() * 0.16 : Math.random() ** 1.4;
     const elevation = (2.5 + rise * 30) * DEG;
     const fromMoon = Math.abs(Math.atan2(Math.sin(azimuth - moonAzimuth), Math.cos(azimuth - moonAzimuth)));
     if (fromMoon < 0.12 && Math.abs(elevation - MOON_ELEVATION) < 0.12) continue;
-    const bright = stars.length < brightCount;
     stars.push({
       position: [
         Math.sin(azimuth) * radius * Math.cos(elevation),
@@ -1047,15 +1107,17 @@ function starField(moonAzimuth) {
         Math.cos(azimuth) * radius * Math.cos(elevation),
       ],
       seed: [
-        bright ? 2 + Math.random() * 0.5 : 1 + Math.random(),
-        bright ? 1.3 + Math.random() * 0.3 : 0.5 + Math.random() * 0.5,
-        0.7 + Math.random() * 0.8,
+        bright ? 9 : 7,
+        bright ? 1.3 + Math.random() * 0.3 : 0.55 + Math.random() * 0.5,
+        1.5 + Math.random() * 1.1 + 1.4 * (1 - rise),
         Math.random() * 100,
       ],
-      extra: [rise, Math.random() < 0.15 ? 1 : 0],
+      extra: [rise, shimmer ? 1 : 0, bright ? 0.65 : 0.45 + Math.random() * 0.1],
     });
   }
 
+  // seed: sprite size (CSS px), brightness, changes per second, phase.
+  // extra: height above the horizon (0-1), colour shimmer flag, core radius (CSS px).
   const material = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -1068,42 +1130,49 @@ function starField(moonAzimuth) {
     },
     vertexShader: `
       attribute vec4 seed;
-      attribute vec2 extra;
+      attribute vec3 extra;
       uniform float time;
       uniform float motion;
       uniform float pixelRatio;
       uniform float bloomMode;
       varying vec3 vColor;
+      varying float vSize;
+      varying float vCore;
       float hash(float n) { return fract(sin(n) * 43758.5453); }
       float noise(float x) {
         float i = floor(x);
         float f = fract(x);
-        f = f * f * (3.0 - 2.0 * f);
-        return mix(hash(i), hash(i + 1.0), f);
+        f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+        return mix(hash(i), hash(i + 1.0), f) * 2.0 - 1.0;
       }
       void main() {
         float low = 1.0 - extra.x;
-        float rate = seed.z * mix(0.6, 1.5, low);
-        float t = time * motion * rate + seed.w;
-        float n = noise(t * 7.0) * 0.6 + noise(t * 17.0 + 11.0) * 0.4;
-        float depth = mix(0.15, 0.85, low * low);
-        float flicker = mix(1.0, 1.0 + depth * (n * 2.0 - 1.0) * 1.3, motion);
+        float t = time * motion * seed.z + seed.w;
+        float n = noise(t) * 0.7 + noise(t * 0.53 + 31.0) * 0.3;
+        float swing = mix(0.15, 0.3, low * low);
+        float flicker = max(1.0 + swing * n * motion, 0.7);
         vec3 tint = vec3(0.82, 0.88, 1.0);
         if (extra.y > 0.5) {
-          vec3 shifted = mix(vec3(1.0, 0.76, 0.62), vec3(0.62, 0.8, 1.0), noise(t * 9.0 + 5.0));
-          tint = mix(tint, shifted, 0.75 * motion);
+          vec3 shifted = mix(vec3(1.0, 0.86, 0.74), vec3(0.74, 0.86, 1.0), noise(t * 0.4 + 7.0) * 0.5 + 0.5);
+          tint = mix(tint, shifted, 0.3 * motion);
         }
-        vColor = tint * seed.y * max(flicker, 0.05) * mix(1.0, 0.35, bloomMode);
+        vColor = tint * seed.y * flicker * mix(1.0, 0.35, bloomMode);
+        vSize = seed.x;
+        vCore = extra.z;
         gl_PointSize = seed.x * pixelRatio;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: `
       varying vec3 vColor;
+      varying float vSize;
+      varying float vCore;
       void main() {
-        float d = length(gl_PointCoord - 0.5) * 2.0;
-        float a = 1.0 - smoothstep(0.4, 1.0, d);
-        gl_FragColor = vec4(vColor, a);
+        float r = length(gl_PointCoord - 0.5) * vSize;
+        float core = exp(-r * r / (2.0 * vCore * vCore));
+        float halo = exp(-r * r / 3.2) * 0.07;
+        float edge = 1.0 - smoothstep(vSize * 0.36, vSize * 0.5, r);
+        gl_FragColor = vec4(vColor, (core + halo) * edge);
       }
     `,
   });
@@ -1113,7 +1182,7 @@ function starField(moonAzimuth) {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(set.flatMap((star) => star.position), 3));
     geometry.setAttribute("seed", new THREE.Float32BufferAttribute(set.flatMap((star) => star.seed), 4));
-    geometry.setAttribute("extra", new THREE.Float32BufferAttribute(set.flatMap((star) => star.extra), 2));
+    geometry.setAttribute("extra", new THREE.Float32BufferAttribute(set.flatMap((star) => star.extra), 3));
     const points = new THREE.Points(geometry, material);
     points.renderOrder = -9;
     points.frustumCulled = false;
@@ -1121,6 +1190,205 @@ function starField(moonAzimuth) {
     group.add(points);
   });
   return group;
+}
+
+function meteorTrail() {
+  const segments = 24;
+  const along = [];
+  const side = [];
+  const index = [];
+  for (let i = 0; i <= segments; i += 1) {
+    along.push(i / segments, i / segments);
+    side.push(-1, 1);
+    if (i < segments) index.push(i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 1, i * 2 + 3, i * 2 + 2);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(along.length * 3), 3));
+  geometry.setAttribute("along", new THREE.Float32BufferAttribute(along, 1));
+  geometry.setAttribute("side", new THREE.Float32BufferAttribute(side, 1));
+  geometry.setIndex(index);
+
+  meteor.uniforms = {
+    from: { value: meteor.from },
+    axis: { value: meteor.axis },
+    head: { value: 0 },
+    tail: { value: 0.08 },
+    width: { value: 0.02 },
+    alpha: { value: 0 },
+    glow: { value: new THREE.Color(0.92, 0.95, 1.0) },
+  };
+  const tail = new THREE.Mesh(geometry, new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    uniforms: meteor.uniforms,
+    vertexShader: `
+      attribute float along;
+      attribute float side;
+      uniform vec3 from;
+      uniform vec3 axis;
+      uniform float head;
+      uniform float tail;
+      uniform float width;
+      varying float vAlong;
+      varying float vSide;
+      void main() {
+        float a = max(head - along * tail, 0.0);
+        vec3 dir = from * cos(a) + cross(axis, from) * sin(a);
+        float taper = 0.3 + 0.7 * pow(1.0 - along, 0.8);
+        vec3 p = dir * ${METEOR_RADIUS.toFixed(1)} + axis * side * width * taper;
+        vAlong = along;
+        vSide = side;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 glow;
+      uniform float alpha;
+      varying float vAlong;
+      varying float vSide;
+      void main() {
+        float across = 1.0 - vSide * vSide;
+        float fade = pow(1.0 - vAlong, 1.8);
+        gl_FragColor = vec4(glow, alpha * across * fade);
+      }
+    `,
+  }));
+  tail.renderOrder = -9;
+  tail.frustumCulled = false;
+
+  meteor.head = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: radialTexture([
+      [0, "rgba(255,255,255,1)"],
+      [0.16, "rgba(250,248,255,0.6)"],
+      [0.45, "rgba(215,228,255,0.1)"],
+      [1, "rgba(215,228,255,0)"],
+    ]),
+    color: new THREE.Color(1, 1, 1),
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    opacity: 0,
+  }));
+  meteor.head.renderOrder = -9;
+  meteor.head.layers.enable(BLOOM_LAYER);
+  bloomTints.push({
+    material: meteor.head.material,
+    color: meteor.head.material.color.clone(),
+    bloom: new THREE.Color(0.45, 0.46, 0.5),
+  });
+
+  meteor.group = new THREE.Group();
+  meteor.group.visible = false;
+  meteor.group.add(tail, meteor.head);
+  return meteor.group;
+}
+
+const skyLook = new THREE.Vector3();
+const skyStart = new THREE.Vector3();
+const skyEnd = new THREE.Vector3();
+const skyPoint = new THREE.Vector3();
+
+function skyDirection(target, azimuth, elevation) {
+  return target.set(
+    Math.sin(azimuth) * Math.cos(elevation),
+    Math.sin(elevation),
+    Math.cos(azimuth) * Math.cos(elevation),
+  );
+}
+
+function meteorPoint(target, angle) {
+  return target
+    .crossVectors(meteor.axis, meteor.from)
+    .multiplyScalar(Math.sin(angle))
+    .addScaledVector(meteor.from, Math.cos(angle));
+}
+
+// Highest elevation of open sky seen through the glass at this azimuth.
+function skyLimit(azimuth) {
+  const dx = Math.sin(azimuth);
+  const dz = Math.cos(azimuth);
+  const b = camera.position.x * dx + camera.position.z * dz;
+  const c = camera.position.x ** 2 + camera.position.z ** 2 - ROOM_RADIUS ** 2;
+  const distance = -b + Math.sqrt(b * b - c);
+  return Math.atan2(SOFFIT_Y - camera.position.y, distance);
+}
+
+function launchMeteor(time) {
+  meteor.nextAt = time + 25 + Math.random() * 35;
+  camera.getWorldDirection(skyLook);
+  const heading = Math.atan2(skyLook.x, skyLook.z);
+  const pitch = Math.asin(clamp(skyLook.y, -1, 1));
+  const halfHeight = (camera.fov * DEG) / 2;
+  const halfWidth = Math.atan(Math.tan(halfHeight) * camera.aspect);
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const azimuth = heading + (Math.random() * 2 - 1) * halfWidth * 0.7;
+    const top = Math.min(skyLimit(azimuth), pitch + halfHeight - 3 * DEG, 40 * DEG);
+    if (top < 8 * DEG) continue;
+    const elevation = top * (0.6 + Math.random() * 0.32);
+    const duration = 0.6 + Math.random() * 0.6;
+    const travel = (5 + Math.random() * 6) * DEG;
+    const slant = (25 + Math.random() * 25) * DEG;
+    const direction = Math.random() < 0.5 ? -1 : 1;
+    skyDirection(skyStart, azimuth, elevation);
+    skyDirection(
+      skyEnd,
+      azimuth + (direction * travel * Math.cos(slant)) / Math.cos(elevation),
+      elevation - travel * Math.sin(slant),
+    );
+
+    meteor.from.copy(skyStart);
+    meteor.axis.crossVectors(skyStart, skyEnd).normalize();
+    const speed = skyStart.angleTo(skyEnd) / duration;
+    const total = speed * (duration + METEOR_FADE);
+    const lowest = Math.asin(meteorPoint(skyPoint, total).y);
+    if (lowest < 2 * DEG) continue;
+    let nearMoon = false;
+    for (let step = 0; step <= 4; step += 1) {
+      if (meteorPoint(skyPoint, (total * step) / 4).angleTo(moonDirection) < 15 * DEG) nearMoon = true;
+    }
+    if (nearMoon) continue;
+
+    const bright = Math.random() < 0.2;
+    meteor.active = true;
+    meteor.start = time;
+    meteor.duration = duration;
+    meteor.speed = speed;
+    meteor.brightness = bright ? 1 : 0.6;
+    meteor.uniforms.width.value = bright ? 0.024 : 0.017;
+    meteor.uniforms.tail.value = Math.min(skyStart.angleTo(skyEnd) * 0.6, 6 * DEG);
+    meteor.group.visible = true;
+    return;
+  }
+}
+
+function updateMeteor(still) {
+  const time = shared.time.value;
+  if (still) {
+    meteor.active = false;
+    meteor.group.visible = false;
+    return;
+  }
+  if (!meteor.active) {
+    if (time < meteor.nextAt) return;
+    launchMeteor(time);
+    if (!meteor.active) return;
+  }
+  const age = time - meteor.start;
+  if (age > meteor.duration + METEOR_FADE) {
+    meteor.active = false;
+    meteor.group.visible = false;
+    return;
+  }
+  const life = smooth(0, 0.1, age) * (1 - smooth(meteor.duration, meteor.duration + METEOR_FADE, age));
+  const angle = age * meteor.speed;
+  meteor.uniforms.head.value = angle;
+  meteor.uniforms.alpha.value = life * meteor.brightness;
+  meteorPoint(meteor.head.position, angle).multiplyScalar(METEOR_RADIUS);
+  meteor.head.material.opacity = life * meteor.brightness;
+  meteor.head.scale.setScalar(meteor.brightness > 0.8 ? 0.13 : 0.1);
 }
 
 async function addArtworks(brass) {
@@ -1365,7 +1633,7 @@ function artAngle(index) {
   return Math.PI + Math.PI / 9 - index * ((Math.PI * 2) / TOTAL);
 }
 
-function captureEnvironment() {
+function captureEnvironment(brass) {
   beam.visible = false;
   const pmrem = new THREE.PMREMGenerator(renderer);
   const target = pmrem.fromScene(scene, 0.02, 0.05, 60, {
@@ -1375,6 +1643,8 @@ function captureEnvironment() {
   pmrem.dispose();
   scene.environment = target.texture;
   scene.environmentIntensity = 2.7;
+  brass.envMap = target.texture;
+  brass.envMapIntensity = 3.4;
   beam.visible = true;
 }
 
@@ -1411,7 +1681,10 @@ function setupComposers() {
         uniform sampler2D bloomTexture;
         varying vec2 vUv;
         void main() {
-          gl_FragColor = texture2D(baseTexture, vUv) + texture2D(bloomTexture, vUv);
+          vec4 color = texture2D(baseTexture, vUv) + texture2D(bloomTexture, vUv);
+          vec2 edge = vUv - 0.5;
+          float vignette = 1.0 - 0.3 * smoothstep(0.2, 1.0, dot(edge, edge) * 2.0);
+          gl_FragColor = vec4(color.rgb * vignette, color.a);
         }
       `,
     }),
@@ -1524,6 +1797,7 @@ function showHover(event) {
     hoverLabel.hidden = true;
     return;
   }
+  dismissHint();
   hoverLabel.hidden = false;
   hoverLabel.textContent = WORKS[hit.object.userData.index].title;
 }
@@ -1626,6 +1900,167 @@ function applyRingPose() {
 
 function noteInteraction() {
   lastInput = performance.now();
+  dismissHint();
+}
+
+// A few frames under the curtain let textures upload and shaders compile before the fade.
+function revealRoom() {
+  let frames = 0;
+  const wait = () => {
+    frames += 1;
+    if (frames < 4) {
+      requestAnimationFrame(wait);
+      return;
+    }
+    lastInput = performance.now();
+    soundToggle.hidden = false;
+    const fade = endIntro();
+    hintTimer = setTimeout(showHint, fade * 0.75);
+  };
+  requestAnimationFrame(wait);
+}
+
+function endIntro() {
+  if (!intro) return 0;
+  const fade = reduceMotion.matches ? 500 : 1600;
+  intro.style.transitionDuration = `${fade}ms`;
+  intro.classList.add("is-done");
+  setTimeout(() => intro.remove(), fade + 100);
+  return fade;
+}
+
+function showHint() {
+  if (hintState !== "pending") return;
+  hintState = "shown";
+  const verbs = coarsePointer.matches ? ["Swipe", "Tap"] : ["Drag", "Click"];
+  hint.textContent = `${verbs[0]} to walk · ${verbs[1]} a work to approach`;
+  hint.hidden = false;
+  void hint.offsetWidth;
+  hint.classList.add("is-visible");
+  hintTimer = setTimeout(dismissHint, HINT_DURATION);
+}
+
+function dismissHint() {
+  if (hintState === "done") return;
+  const shown = hintState === "shown";
+  hintState = "done";
+  clearTimeout(hintTimer);
+  if (!shown) return;
+  hint.classList.remove("is-visible");
+  setTimeout(() => {
+    hint.hidden = true;
+  }, 800);
+}
+
+function toggleOcean() {
+  ocean.on = !ocean.on;
+  soundToggle.setAttribute("aria-pressed", String(ocean.on));
+  setOcean(ocean.on);
+}
+
+function setOcean(audible) {
+  if (audible && !ocean.context) buildOcean();
+  if (!ocean.context) return;
+  const { context, master } = ocean;
+  const now = context.currentTime;
+  clearTimeout(ocean.sleepTimer);
+  clearTimeout(ocean.timer);
+  master.gain.cancelScheduledValues(now);
+  master.gain.setValueAtTime(master.gain.value, now);
+  if (audible) {
+    context.resume();
+    master.gain.linearRampToValueAtTime(0.5, now + 3);
+    ocean.nextWave = Math.max(ocean.nextWave, now + 0.2);
+    scheduleWaves();
+  } else {
+    master.gain.linearRampToValueAtTime(0, now + 1.6);
+    ocean.sleepTimer = setTimeout(() => context.suspend(), 1800);
+  }
+}
+
+function buildOcean() {
+  const context = new AudioContext();
+  const seconds = 9;
+  const length = Math.floor(context.sampleRate * seconds);
+  const overlap = Math.floor(context.sampleRate * 0.5);
+  const buffer = context.createBuffer(2, length, context.sampleRate);
+  for (let channel = 0; channel < 2; channel += 1) {
+    const noise = pinkNoise(length + overlap);
+    const data = buffer.getChannelData(channel);
+    data.set(noise.subarray(0, length));
+    // Crossfade the head with the samples that follow the end so the loop has no seam.
+    for (let i = 0; i < overlap; i += 1) {
+      const t = i / overlap;
+      data[i] = noise[i] * Math.sqrt(t) + noise[length + i] * Math.sqrt(1 - t);
+    }
+  }
+
+  const master = context.createGain();
+  master.gain.value = 0;
+  master.connect(context.destination);
+
+  const body = context.createBufferSource();
+  body.buffer = buffer;
+  body.loop = true;
+  const bodyFilter = context.createBiquadFilter();
+  bodyFilter.type = "lowpass";
+  bodyFilter.frequency.value = 300;
+  const bodyGain = context.createGain();
+  bodyGain.gain.value = 0.42;
+  const swell = context.createOscillator();
+  swell.frequency.value = 0.045;
+  const swellDepth = context.createGain();
+  swellDepth.gain.value = 0.1;
+  swell.connect(swellDepth).connect(bodyGain.gain);
+  body.connect(bodyFilter).connect(bodyGain).connect(master);
+
+  const wash = context.createBufferSource();
+  wash.buffer = buffer;
+  wash.loop = true;
+  const washFilter = context.createBiquadFilter();
+  washFilter.type = "lowpass";
+  washFilter.frequency.value = 380;
+  washFilter.Q.value = 0.4;
+  const washGain = context.createGain();
+  washGain.gain.value = 0.06;
+  wash.connect(washFilter).connect(washGain).connect(master);
+
+  body.start();
+  wash.start(0, seconds * 0.41);
+  swell.start();
+  Object.assign(ocean, { context, master, washGain, washFilter, nextWave: context.currentTime });
+}
+
+function pinkNoise(length) {
+  const out = new Float32Array(length);
+  let b0 = 0;
+  let b1 = 0;
+  let b2 = 0;
+  for (let i = 0; i < length; i += 1) {
+    const white = Math.random() * 2 - 1;
+    b0 = 0.99765 * b0 + white * 0.099046;
+    b1 = 0.963 * b1 + white * 0.2965164;
+    b2 = 0.57 * b2 + white * 1.0526913;
+    out[i] = (b0 + b1 + b2 + white * 0.1848) * 0.16;
+  }
+  return out;
+}
+
+// Each wave swells in over a few seconds and draws back more slowly, at an uneven pace.
+function scheduleWaves() {
+  const { context, washGain, washFilter } = ocean;
+  while (ocean.nextWave < context.currentTime + 12) {
+    const at = ocean.nextWave;
+    const period = 7 + Math.random() * 5;
+    const rise = period * (0.3 + Math.random() * 0.15);
+    const peak = 0.3 + Math.random() * 0.4;
+    washGain.gain.setTargetAtTime(peak, at, rise / 3);
+    washGain.gain.setTargetAtTime(0.06, at + rise, (period - rise) / 3.5);
+    washFilter.frequency.setTargetAtTime(500 + peak * 1500, at, rise / 3);
+    washFilter.frequency.setTargetAtTime(380, at + rise, (period - rise) / 3);
+    ocean.nextWave = at + period;
+  }
+  ocean.timer = setTimeout(scheduleWaves, 4000);
 }
 
 function pixelRatio() {
@@ -1702,6 +2137,7 @@ function tick() {
 
   panoGroup.position.x = camera.position.x;
   panoGroup.position.z = camera.position.z;
+  updateMeteor(still);
 
   beam.rotation.y = beamAngle;
   const beamDir = shared.beamDir.value.set(Math.cos(beamAngle), 0, -Math.sin(beamAngle));
